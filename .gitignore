@@ -1,0 +1,12 @@
+# Eldev dependencies
+.eldev/
+
+# Byte-compiled elisp
+*.elc
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store

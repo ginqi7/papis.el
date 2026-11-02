@@ -1,0 +1,14 @@
+; -*- mode: emacs-lisp; lexical-binding: t -*-
+
+;; Eldev configuration for papis.el.
+;;
+;; One package, two files: without this, package-lint treats each file as
+;; its own package and complains that papis.el's symbols are not prefixed
+;; "papis-vui".  All Package-Requires live in the main file only.
+
+(eldev-use-package-archive 'gnu-elpa)
+(eldev-use-package-archive 'melpa)
+
+(eldev-use-vc-repository 'vui :github "d12frosted/vui.el")
+
+(setq eldev-project-main-file "papis.el")
