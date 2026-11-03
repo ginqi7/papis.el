@@ -187,11 +187,13 @@ Papis is installed in.  See `papis-fallback-to-cli'."
    (or (and load-file-name (file-name-directory load-file-name))
        (and buffer-file-name (file-name-directory buffer-file-name))
        default-directory))
-  "Python helper that updates book metadata and renames EPUB files.
+  "Python helper that updates book metadata and renames book files.
 
-It reads the EPUB metadata, merges it with `info.yaml', writes the
-result back to both files, and renames the EPUB to
-\"author - title (year).epub\".  The script lives in this
+It reads the metadata of an EPUB or PDF, merges it with
+`info.yaml', writes the result back to both files, and renames the
+file to \"author - title (year).epub\" or \"... .pdf\".  EPUB
+metadata is updated in place; PDF metadata is written with
+ExifTool, which must be installed.  The script lives in this
 repository, so the default normally needs no changes."
   :type 'string
   :group 'papis)
@@ -968,9 +970,9 @@ when the folder is still there."
 ;;; Book metadata
 
 (defun papis-document-book-files (document)
-  "Return the EPUB files attached to DOCUMENT."
+  "Return the EPUB and PDF files attached to DOCUMENT."
   (seq-filter (lambda (file)
-                (string-match-p "\\.epub\\'" (downcase file)))
+                (string-match-p "\\.\\(?:epub\\|pdf\\)\\'" (downcase file)))
               (papis-document-files document)))
 
 (defun papis-document-book-metadata-command (file)
@@ -1059,23 +1061,24 @@ in the library."
       result)))
 
 (defun papis-document-update-book-metadata (document &optional file)
-  "Update DOCUMENT's book metadata and rename its EPUB file.
+  "Update DOCUMENT's book metadata and rename its EPUB or PDF file.
 
 Run `papis-book-metadata-script' on FILE, which defaults to the
-first EPUB attached to DOCUMENT.  The script merges the EPUB
-metadata with `info.yaml', writes both files back and renames the
-EPUB to \"author - title (year).epub\".  Refresh the Papis cache
+first EPUB or PDF attached to DOCUMENT.  The script merges the
+file's metadata with `info.yaml', writes both files back and
+renames the file to \"author - title (year).epub\" (or `.pdf').
+PDF metadata is written with ExifTool.  Refresh the Papis cache
 afterwards so the server returns the new metadata.  Return the
 script output."
   (let ((file (or file (car (papis-document-book-files document)))))
     (unless file
-      (user-error "Document \"%s\" has no EPUB file"
+      (user-error "Document \"%s\" has no EPUB or PDF file"
                   (papis-document-title document)))
     (unless (file-exists-p file)
       (signal 'papis-error (list (format "Book file not found: %s" file))))
-    (unless (string-match-p "\\.epub\\'" (downcase file))
+    (unless (string-match-p "\\.\\(?:epub\\|pdf\\)\\'" (downcase file))
       (signal 'papis-error
-              (list (format "Not an EPUB file: %s" file))))
+              (list (format "Not an EPUB or PDF file: %s" file))))
     (let ((output (papis--run-book-metadata-script file)))
       (papis-document-refresh-cache document)
       output)))
@@ -1083,9 +1086,9 @@ script output."
 (defun papis-document-sync-metadata (document)
   "Sync DOCUMENT's metadata after `info.yaml' was edited.
 
-When DOCUMENT has an EPUB file, run the book metadata script so the
-EPUB is updated and renamed.  Otherwise only refresh the Papis
-cache."
+When DOCUMENT has an EPUB or PDF file, run the book metadata script
+so the file is updated and renamed.  Otherwise only refresh the
+Papis cache."
   (if (papis-document-book-files document)
       (papis-document-update-book-metadata document)
     (papis-document-refresh-cache document)))

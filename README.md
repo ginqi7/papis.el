@@ -18,6 +18,8 @@ bug; it is never used in the normal path.
 - Emacs 29.1 or newer
 - Papis 0.16 or newer, with the `papis` executable on `exec-path`
 - [vui.el](https://github.com/d12frosted/vui.el) 1.4.0 or newer
+- [ExifTool](https://exiftool.org) for updating PDF metadata (for example
+  `brew install exiftool`)
 
 ## Setup
 
@@ -66,7 +68,7 @@ this Emacs.
 | `b`       | Copy a BibTeX entry              |
 | `c`       | Copy a human-readable reference  |
 | `e`       | Manually edit the metadata       |
-| `m`       | Update EPUB metadata and rename  |
+| `m`       | Update EPUB/PDF metadata and rename |
 | `D`       | Delete the selected document     |
 | `TAB`     | Move between buttons and fields  |
 | `q`       | Quit the window                  |
@@ -83,18 +85,22 @@ log every `papis rm` invocation.
 
 `e` (or the **Edit** button) opens `info.yaml` in a dedicated
 `papis-vui-metadata-edit-mode` buffer for manual editing.  `C-c C-c`
-writes the metadata, updates and renames the EPUB when the document has one,
-refreshes the Papis cache and returns to the frontend; `C-c C-k` cancels.
+writes the metadata, updates and renames the EPUB or PDF when the document
+has one, refreshes the Papis cache and returns to the frontend; `C-c C-k`
+cancels.
 
 `m` (or the **Auto metadata** button) runs
-`scripts/papis_book_metadata.py` on the selected document's EPUB file.  The
-script reads the EPUB's Dublin Core metadata, merges it with `info.yaml`,
-writes both back, renames the EPUB to `author - title (year).epub`, and the
-frontend then refreshes the Papis cache (`papis cache update` for the
-document folder, or `papis cache update-newer` when the folder is unknown)
-so the server returns the new metadata.  The script uses `uv` (through its
-shebang) and declares its `ebooklib` and `pyyaml` dependencies itself, so no
-extra setup is needed after `uv` is installed.  Customize
+`scripts/papis_book_metadata.py` on the selected document's EPUB or PDF
+file.  For an EPUB the script reads the Dublin Core metadata; for a PDF it
+reads Title, Author and CreateDate through ExifTool.  It merges that with
+`info.yaml`, writes both back, renames the file to
+`author - title (year).epub` (or `.pdf`), and the frontend then refreshes
+the Papis cache (`papis cache update` for the document folder, or `papis
+cache update-newer` when the folder is unknown) so the server returns the
+new metadata.  The script uses `uv` (through its shebang) and declares its
+`ebooklib` and `pyyaml` dependencies itself, so no extra setup is needed
+after `uv` is installed; PDF support additionally needs `exiftool` on
+`PATH` (for example `brew install exiftool`).  Customize
 `papis-book-metadata-script` to use a different script.
 
 ## Papis API used by `papis.el`

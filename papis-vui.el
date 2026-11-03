@@ -574,7 +574,7 @@ STATE controls whether the text is expanded or truncated."
                    (papis-vui--call #'papis-document-open-info document)))
      (vui-button "Edit"
        :disabled (or (null info) (not (file-exists-p info)))
-       :help-echo "Manually edit the metadata and sync the EPUB"
+       :help-echo "Manually edit the metadata and sync the book file"
        :on-click (lambda () (papis-vui-edit-metadata document)))
      (vui-button "BibTeX"
        :help-echo "Copy a BibTeX entry to the kill ring"
@@ -584,7 +584,7 @@ STATE controls whether the text is expanded or truncated."
        :on-click (lambda () (papis-vui-copy-reference)))
      (vui-button "Auto metadata"
        :disabled (null book-files)
-       :help-echo "Update EPUB metadata and rename the file"
+       :help-echo "Update EPUB/PDF metadata and rename the file"
        :on-click (lambda () (papis-vui-update-book-metadata document)))
      (vui-button "Delete"
        :face 'error
@@ -833,12 +833,13 @@ document afterwards."
          (message "Papis: %s" (papis-error-message err)))))))
 
 (defun papis-vui-update-book-metadata (&optional document)
-  "Update the book metadata of DOCUMENT and rename its EPUB file.
+  "Update the book metadata of DOCUMENT and rename its EPUB/PDF file.
 
-Run `papis-book-metadata-script' to merge the EPUB metadata with
-`info.yaml', write both files back, rename the EPUB to
-\"author - title (year).epub\" and refresh the Papis cache.  When
-DOCUMENT has several EPUB files, ask which one to update."
+Run `papis-book-metadata-script' to merge the file's metadata with
+`info.yaml', write both files back, rename the file to
+\"author - title (year).epub\" (or `.pdf') and refresh the Papis
+cache.  PDF metadata is written with ExifTool.  When DOCUMENT has
+several EPUB/PDF files, ask which one to update."
   (interactive)
   (let* ((document (or document (papis-vui--current-document)))
          (title (papis-document-title document))
@@ -848,10 +849,10 @@ DOCUMENT has several EPUB files, ask which one to update."
                 ((null files) nil)
                 ((null (cdr files)) (car files))
                 (t (completing-read
-                    (format "EPUB file for \"%s\": " title)
+                    (format "Book file for \"%s\": " title)
                     files nil t nil nil (car files))))))
     (unless file
-      (user-error "Document \"%s\" has no EPUB file" title))
+      (user-error "Document \"%s\" has no EPUB or PDF file" title))
     (papis-vui--status "updating metadata for %s..." title)
     (condition-case err
         (progn
@@ -878,8 +879,8 @@ DOCUMENT has several EPUB files, ask which one to update."
 (defun papis-vui-metadata-commit ()
   "Write the metadata buffer and sync its document.
 
-After `info.yaml' is written, the EPUB is updated and renamed when
-the document has one, and the Papis cache is refreshed.  The
+After `info.yaml' is written, the EPUB or PDF is updated and renamed
+when the document has one, and the Papis cache is refreshed.  The
 buffer is killed on success and kept on error so that the metadata
 can be fixed."
   (interactive)
@@ -934,8 +935,9 @@ can be fixed."
 
 Open DOCUMENT's `info.yaml' in a dedicated buffer.  Press
 \[papis-vui-metadata-commit] to write the changes, update and rename
-the EPUB when there is one, refresh the Papis cache and return to
-the frontend.  Press \[papis-vui-metadata-cancel] to cancel."
+the EPUB or PDF when there is one, refresh the Papis cache and
+return to the frontend.  Press \[papis-vui-metadata-cancel] to
+cancel."
   (interactive)
   (let* ((document (or document (papis-vui--current-document)))
          (info (papis-document-info-file document))

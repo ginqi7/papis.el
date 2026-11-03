@@ -166,13 +166,15 @@
           (expect (papis-document-delete document) :to-be-truthy)))))
 
   (describe "book metadata"
-    (it "finds the EPUB files of a document"
+    (it "finds the EPUB and PDF files of a document"
       (let ((document (papis-test--document
                        '((title . "A Book")
-                         (files . ("/tmp/a.pdf" "/tmp/b.EPUB" "/tmp/c.epub")))
+                         (files . ("/tmp/a.pdf" "/tmp/b.EPUB" "/tmp/c.epub"
+                                   "/tmp/d.PDF" "/tmp/e.djvu")))
                        "books")))
         (expect (papis-document-book-files document)
-                :to-equal '("/tmp/b.EPUB" "/tmp/c.epub"))))
+                :to-equal '("/tmp/a.pdf" "/tmp/b.EPUB" "/tmp/c.epub"
+                            "/tmp/d.PDF"))))
 
     (it "runs an executable metadata script directly"
       (let ((script (make-temp-file "papis-book-metadata-" nil ".py")))
@@ -224,10 +226,37 @@
                         :to-equal "renamed: book.epub -> a-book.epub")
                 (expect ran :to-equal file)
                 (expect refreshed :to-be document)))
+          (delete-directory folder t))))
+
+    (it "updates the metadata of a PDF and then the cache"
+      (let* ((folder (make-temp-file "papis-test-doc-" t))
+             (file (expand-file-name "book.pdf" folder))
+             (document (papis-test--document
+                        `((title . "A Book")
+                          (files . (,file))
+                          (_papis_local_folder . ,folder))
+                        "books"))
+             (ran nil)
+             (refreshed nil))
+        (unwind-protect
+            (progn
+              (with-temp-file file (insert "fake pdf"))
+              (cl-letf (((symbol-function 'papis--run-book-metadata-script)
+                         (lambda (target)
+                           (setq ran target)
+                           "renamed: book.pdf -> a-book.pdf"))
+                        ((symbol-function 'papis-document-refresh-cache)
+                         (lambda (doc)
+                           (setq refreshed doc)
+                           (list :status 0))))
+                (expect (papis-document-update-book-metadata document)
+                        :to-equal "renamed: book.pdf -> a-book.pdf")
+                (expect ran :to-equal file)
+                (expect refreshed :to-be document)))
           (delete-directory folder t)))))
 
   (describe "manual metadata editing"
-    (it "syncs an EPUB after an edit and otherwise refreshes the cache"
+    (it "syncs an EPUB or PDF after an edit and otherwise refreshes the cache"
       (let* ((epub (papis-test--document
                     '((title . "A Book")
                       (files . ("/tmp/book.epub")))
@@ -236,11 +265,16 @@
                    '((title . "A Paper")
                      (files . ("/tmp/paper.pdf")))
                    "books"))
+             (djvu (papis-test--document
+                    '((title . "A Scan")
+                      (files . ("/tmp/scan.djvu")))
+                    "books"))
              (synced nil)
              (refreshed nil))
         (cl-letf (((symbol-function 'papis-document-update-book-metadata)
                    (lambda (doc)
                      (setq synced doc)
+                     (setq refreshed nil)
                      'book))
                   ((symbol-function 'papis-document-refresh-cache)
                    (lambda (doc)
@@ -249,8 +283,11 @@
           (expect (papis-document-sync-metadata epub) :to-equal 'book)
           (expect synced :to-be epub)
           (expect refreshed :to-be nil)
-          (expect (papis-document-sync-metadata pdf) :to-equal 'cache)
-          (expect refreshed :to-be pdf))))
+          (expect (papis-document-sync-metadata pdf) :to-equal 'book)
+          (expect synced :to-be pdf)
+          (expect refreshed :to-be nil)
+          (expect (papis-document-sync-metadata djvu) :to-equal 'cache)
+          (expect refreshed :to-be djvu))))
 
     (it "opens an editable metadata buffer"
       (let* ((folder (make-temp-file "papis-test-doc-" t))
