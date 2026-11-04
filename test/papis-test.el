@@ -165,6 +165,106 @@
                      (list :status 0 :stdout "" :stderr ""))))
           (expect (papis-document-delete document) :to-be-truthy)))))
 
+  (describe "tagging"
+    (it "offers the preset tags"
+      (expect papis-tags :to-equal '("reading" "read")))
+
+    (it "builds `papis tag' arguments from the document folder"
+      (let ((document (papis-test--document
+                       '((papis_id . "abc123")
+                         (title . "A Title")
+                         (_papis_local_folder . "/tmp/books/a-title"))
+                       "books")))
+        (expect (papis-document-tag-arguments document "--add" "reading")
+                :to-equal '("-l" "books" "tag" "--batch" "--all"
+                            "--doc-folder" "/tmp/books/a-title/"
+                            "--add" "reading"))))
+
+    (it "falls back to the document id"
+      (let ((document (papis-test--document
+                       '((papis_id . "abc123")
+                         (title . "A Title"))
+                       "books")))
+        (expect (papis-document-tag-arguments document "--remove" "read")
+                :to-equal '("-l" "books" "tag" "--batch" "--all"
+                            "papis_id:abc123"
+                            "--remove" "read"))))
+
+    (it "signals an error without an id or folder"
+      (let ((document (papis-test--document '((title . "A Title")) "books")))
+        (expect (papis-document-tag-arguments document "--add" "reading")
+                :to-throw 'papis-error)))
+
+    (it "adds a tag and updates the document in memory"
+      (let ((document (papis-test--document
+                       '((papis_id . "abc123")
+                         (title . "A Title")
+                         (tags . ("old")))
+                       "books"))
+            (arguments nil))
+        (cl-letf (((symbol-function 'papis--call-cli-result)
+                   (lambda (args)
+                     (setq arguments args)
+                     (list :status 0 :stdout "" :stderr ""))))
+          (expect (papis-document-tag-add document "reading") :to-be-truthy)
+          (expect arguments
+                  :to-equal '("-l" "books" "tag" "--batch" "--all"
+                              "papis_id:abc123"
+                              "--add" "reading"))
+          (expect (papis-document-tags document)
+                  :to-equal '("old" "reading")))))
+
+    (it "does not duplicate a tag that is already there"
+      (let ((document (papis-test--document
+                       '((papis_id . "abc123")
+                         (title . "A Title")
+                         (tags . ("reading")))
+                       "books")))
+        (cl-letf (((symbol-function 'papis--call-cli-result)
+                   (lambda (_arguments)
+                     (list :status 0 :stdout "" :stderr ""))))
+          (papis-document-tag-add document "reading")
+          (expect (papis-document-tags document) :to-equal '("reading")))))
+
+    (it "removes a tag from the document in memory"
+      (let ((document (papis-test--document
+                       '((papis_id . "abc123")
+                         (title . "A Title")
+                         (tags . ("old" "reading" "read")))
+                       "books")))
+        (cl-letf (((symbol-function 'papis--call-cli-result)
+                   (lambda (_arguments)
+                     (list :status 0 :stdout "" :stderr ""))))
+          (expect (papis-document-tag-remove document "reading") :to-be-truthy)
+          (expect (papis-document-tags document)
+                  :to-equal '("old" "read")))))
+
+    (it "reports failures from the tag command"
+      (let ((document (papis-test--document
+                       '((papis_id . "abc123")
+                         (title . "A Title")
+                         (tags . ("old")))
+                       "books")))
+        (cl-letf (((symbol-function 'papis--call-cli-result)
+                   (lambda (_arguments)
+                     (list :status 1 :stdout ""
+                           :stderr "'tags' field does not contain 'missing'\n"))))
+          (expect (papis-document-tag-remove document "missing")
+                  :to-throw 'papis-error)
+          (expect (papis-document-tags document) :to-equal '("old")))))
+
+    (it "restarts only a server started by this Emacs"
+      (cl-letf (((symbol-function 'process-live-p)
+                 (lambda (_process) nil))
+                ((symbol-function 'papis-restart-server)
+                 (lambda () (error "must not restart"))))
+        (expect (papis-document-restart-server) :to-be nil))
+      (cl-letf (((symbol-function 'process-live-p)
+                 (lambda (_process) t))
+                ((symbol-function 'papis-restart-server)
+                 (lambda () 'restarted)))
+        (expect (papis-document-restart-server) :to-be-truthy))))
+
   (describe "book metadata"
     (it "finds the EPUB and PDF files of a document"
       (let ((document (papis-test--document
@@ -386,6 +486,88 @@
           (expect (mapcar #'papis-document-title
                           (papis-vui--sorted-documents state))
                   :to-equal '("Alpha" "Beta" "Gamma"))))))
+
+  (describe "tag commands"
+    (it "offers the presets and the tags used in the library"
+      (let* ((a (papis-test--document
+                 '((title . "Alpha") (tags . ("lisp")))))
+             (b (papis-test--document
+                 '((title . "Beta") (tags . ("emacs" "reading")))))
+             (papis-vui--state (papis-test--state (list a b))))
+        (expect (papis-vui--tag-candidates a)
+                :to-have-same-items-as '("lisp" "reading" "read" "emacs"))))
+
+    (it "adds a tag without prompting when given one"
+      (let* ((document (papis-test--document
+                        '((papis_id . "abc123") (title . "A Title"))
+                        "books"))
+             (papis-vui--state (papis-test--state (list document)))
+             (added nil))
+        (cl-letf (((symbol-function 'papis-document-tag-add)
+                   (lambda (doc tag) (setq added (list doc tag))))
+                  ((symbol-function 'papis-document-restart-server)
+                   (lambda () nil))
+                  ((symbol-function 'papis-vui--redraw) #'ignore))
+          (let ((inhibit-message t))
+            (papis-vui-add-tag "reading" document))
+          (expect added :to-equal (list document "reading")))))
+
+    (it "does not add a tag twice"
+      (let* ((document (papis-test--document
+                        '((papis_id . "abc123")
+                          (title . "A Title")
+                          (tags . ("reading")))
+                        "books"))
+             (papis-vui--state (papis-test--state (list document)))
+             (added nil))
+        (cl-letf (((symbol-function 'papis-document-tag-add)
+                   (lambda (_doc tag) (setq added tag))))
+          (let ((inhibit-message t))
+            (papis-vui-add-tag "reading" document))
+          (expect added :to-be nil))))
+
+    (it "removes a tag of the selected document"
+      (let* ((document (papis-test--document
+                        '((papis_id . "abc123")
+                          (title . "A Title")
+                          (tags . ("old" "reading")))
+                        "books"))
+             (papis-vui--state (papis-test--state (list document)))
+             (removed nil))
+        (cl-letf (((symbol-function 'papis-document-tag-remove)
+                   (lambda (doc tag) (setq removed (list doc tag))))
+                  ((symbol-function 'papis-document-restart-server)
+                   (lambda () nil))
+                  ((symbol-function 'papis-vui--redraw) #'ignore))
+          (let ((inhibit-message t))
+            (papis-vui-remove-tag "reading" document))
+          (expect removed :to-equal (list document "reading")))))
+
+    (it "refuses to remove a tag the document does not have"
+      (let* ((document (papis-test--document
+                        '((papis_id . "abc123")
+                          (title . "A Title")
+                          (tags . ("old")))
+                        "books"))
+             (papis-vui--state (papis-test--state (list document))))
+        (expect (papis-vui-remove-tag "reading" document)
+                :to-throw 'error)))
+
+    (it "reloads from the server after restarting it"
+      (let* ((document (papis-test--document
+                        '((papis_id . "abc123") (title . "A Title"))
+                        "books"))
+             (papis-vui--state (papis-test--state (list document)))
+             (refreshed nil))
+        (cl-letf (((symbol-function 'papis-document-tag-add)
+                   (lambda (_doc _tag) t))
+                  ((symbol-function 'papis-document-restart-server)
+                   (lambda () t))
+                  ((symbol-function 'papis-vui-refresh)
+                   (lambda () (setq refreshed t))))
+          (let ((inhibit-message t))
+            (papis-vui-add-tag "reading" document))
+          (expect refreshed :to-be t)))))
 
   (describe "errors and CLI output"
     (it "prints a custom error without the data quotes"

@@ -214,6 +214,16 @@ an external program."
   :type '(repeat string)
   :group 'papis)
 
+(defcustom papis-tags '("reading" "read")
+  "Tags offered when adding a tag to a document.
+
+These are only completion candidates: `papis-document-tag-add'
+accepts any tag, and tags already used in the library are offered
+too.  Customize this list to preset the tags that are useful to
+you."
+  :type '(repeat string)
+  :group 'papis)
+
 ;;; Internal state
 
 (defvar papis--server-process nil
@@ -966,6 +976,104 @@ when the folder is still there."
               (list (format "`papis %s' matched no document"
                             (string-join arguments " ")))))
      (t t))))
+
+;;; Tags
+
+(defun papis-document-tag-arguments (document &rest actions)
+  "Return the `papis tag' arguments that apply ACTIONS to DOCUMENT.
+
+ACTIONS are appended to the command, for example
+\(\"--add\" \"reading\"\).  The document is selected by its
+folder when known, otherwise by its id."
+  (let* ((library (or (papis-document-library document)
+                      (papis--default-library)))
+         (id (papis-document-id document))
+         (folder (papis-document-folder document))
+         (selector (cond
+                    (folder (list "--doc-folder" folder))
+                    (id (list (format "papis_id:%s" id)))
+                    (t nil))))
+    (unless library
+      (signal 'papis-error
+              (list "Cannot determine the library of the document")))
+    (unless selector
+      (signal 'papis-error
+              (list "Cannot change the tags of a document without an id or folder")))
+    (append (list "-l" library "tag" "--batch" "--all") selector actions)))
+
+(defun papis--document-set-tags (document tags)
+  "Store TAGS in DOCUMENT's in-memory metadata and return them.
+
+This keeps the document in the frontend in sync with the tag
+command; the Papis server itself may need a restart before it
+returns the new tags."
+  (let ((cell (assoc 'tags (papis-document-data document))))
+    (if cell
+        (setcdr cell tags)
+      (setf (papis-document-data document)
+            (cons (cons 'tags tags) (papis-document-data document))))
+    tags))
+
+(defun papis--document-tag-change (document action tag)
+  "Apply tag ACTION, either \"add\" or \"remove\", for TAG to DOCUMENT."
+  (let ((tag (string-trim (or tag ""))))
+    (when (string-empty-p tag)
+      (signal 'papis-error (list "A tag cannot be empty")))
+    (let* ((arguments (apply #'papis-document-tag-arguments document
+                             (list (format "--%s" action) tag)))
+           (result (papis--call-cli-result arguments))
+           (status (plist-get result :status))
+           (output (string-trim
+                    (concat (plist-get result :stdout)
+                            (plist-get result :stderr)))))
+      (when papis-debug
+        (message "Papis: %s %s (exit %s)\n%s"
+                 (papis--papis-program)
+                 (string-join arguments " ")
+                 status output))
+      (unless (zerop status)
+        (signal 'papis-error
+                (list (format "`papis %s' failed (exit %s): %s"
+                              (string-join arguments " ")
+                              status
+                              (if (string-empty-p output)
+                                  "no output"
+                                output)))))
+      (papis--document-set-tags
+       document
+       (let ((tags (papis-document-tags document)))
+         (pcase action
+           ("add" (if (member tag tags) tags (append tags (list tag))))
+           ("remove" (seq-remove (lambda (candidate)
+                                    (equal candidate tag))
+                                  tags))
+           (_ tags))))
+      t)))
+
+(defun papis-document-tag-add (document tag)
+  "Add TAG to DOCUMENT with `papis tag --add'.
+
+An existing tag is left alone, so adding the same tag twice is
+harmless.  Return non-nil on success."
+  (papis--document-tag-change document "add" tag))
+
+(defun papis-document-tag-remove (document tag)
+  "Remove TAG from DOCUMENT with `papis tag --remove'.
+
+Signal `papis-error' when Papis reports that the tag is not there.
+Return non-nil on success."
+  (papis--document-tag-change document "remove" tag))
+
+(defun papis-document-restart-server ()
+  "Restart the Papis server when this Emacs started it.
+
+`papis serve' keeps its library in memory, so metadata written by
+the `papis' command line is not visible to the API until the
+server restarts.  A server started by another program is left
+alone.  Return non-nil when the server was restarted."
+  (when (process-live-p papis--server-process)
+    (papis-restart-server)
+    t))
 
 ;;; Book metadata
 

@@ -591,6 +591,28 @@ STATE controls whether the text is expanded or truncated."
        :help-echo "Delete this document from the library"
        :on-click (lambda () (papis-vui-delete-document document))))))
 
+(defun papis-vui--render-document-tags (document)
+  "Render the tags of DOCUMENT with buttons to remove and add tags."
+  (let ((tags (papis-document-tags document)))
+    (vui-hstack
+     :spacing 1
+     (vui-text "Tags:" :face 'bold)
+     (if (null tags)
+         (vui-muted "none")
+       (vui-list tags
+                 (lambda (tag)
+                   (vui-button tag
+                     :no-decoration t
+                     :help-echo (format "Remove the tag \"%s\"" tag)
+                     :on-click (lambda ()
+                                 (papis-vui-remove-tag tag document))))
+                 #'identity
+                 :vertical nil))
+     (vui-button "+ tag"
+       :no-decoration t
+       :help-echo "Add a tag to this document"
+       :on-click (lambda () (papis-vui-add-tag nil document))))))
+
 (defun papis-vui--render-detail (state document)
   "Render the detail pane of STATE for DOCUMENT."
   (if (null document)
@@ -601,6 +623,8 @@ STATE controls whether the text is expanded or truncated."
      (vui-muted (papis-document-description document))
      (vui-newline)
      (papis-vui--render-metadata document)
+     (vui-newline)
+     (papis-vui--render-document-tags document)
      (papis-vui--render-text-field state document "abstract" "Abstract")
      (papis-vui--render-text-field state document "notes" "Notes")
      (papis-vui--render-text-field state document "note" "Note")
@@ -630,7 +654,7 @@ STATE controls whether the text is expanded or truncated."
      (vui-muted
       "g refresh   / search   l library   s sort   n/p next/prev   o open   u URL   i info   b BibTeX")
      (vui-muted
-      "D delete   c copy reference   d folder   e edit metadata   m auto metadata"))))
+      "D delete   c copy reference   d folder   e edit metadata   m auto metadata   t tag   T untag"))))
 
 (defun papis-vui--render (state)
   "Render the whole frontend for STATE."
@@ -956,6 +980,86 @@ cancel."
       (pop-to-buffer buffer)
       (message "Edit metadata, then C-c C-c to apply and sync"))))
 
+;;; Tags
+
+(defun papis-vui--tag-candidates (document)
+  "Return the tags offered when tagging DOCUMENT.
+
+The current tags, the presets in `papis-tags' and the tags already
+used in the library are all candidates; any other tag can still
+be typed."
+  (delete-dups
+   (append (papis-document-tags document)
+           papis-tags
+           (when papis-vui--state
+             (mapcar #'car
+                     (papis-vui--tag-counts
+                      (papis-vui--state-documents papis-vui--state)))))))
+
+(defun papis-vui--apply-tag (document tag action)
+  "Apply ACTION, `add' or `remove', for TAG to DOCUMENT.
+
+The Papis server keeps its library in memory, so a server started
+by this Emacs is restarted afterwards to make it return the new
+tags; otherwise only the document in the frontend is updated."
+  (let ((title (papis-document-title document)))
+    (papis-vui--status "%s tag \"%s\" %s..."
+                       (if (eq action 'add) "adding" "removing")
+                       tag title)
+    (condition-case err
+        (progn
+          (if (eq action 'add)
+              (papis-document-tag-add document tag)
+            (papis-document-tag-remove document tag))
+          (message "%s tag \"%s\" %s"
+                   (if (eq action 'add) "Added" "Removed")
+                   tag
+                   (if (eq action 'add)
+                       (format "to %s" title)
+                     (format "from %s" title)))
+          (if (papis-document-restart-server)
+              (papis-vui-refresh)
+            (papis-vui--redraw)))
+      (error
+       (message "Papis: %s" (papis-error-message err))
+       (papis-vui--redraw)))))
+
+(defun papis-vui-add-tag (&optional tag document)
+  "Add TAG to DOCUMENT, or to the selected document.
+
+TAG is read with completion over `papis-tags' and the tags already
+used in the library, but any other tag can be typed as well.
+Adding a tag that the document already has does nothing."
+  (interactive)
+  (let* ((document (or document (papis-vui--current-document)))
+         (tag (string-trim
+               (or tag
+                   (completing-read
+                    (format "Add tag to \"%s\": "
+                            (papis-document-title document))
+                    (papis-vui--tag-candidates document)
+                    nil nil nil nil (car papis-tags))))))
+    (when (string-empty-p tag)
+      (user-error "A tag cannot be empty"))
+    (if (member tag (papis-document-tags document))
+        (message "Document already has the tag \"%s\"" tag)
+      (papis-vui--apply-tag document tag 'add))))
+
+(defun papis-vui-remove-tag (&optional tag document)
+  "Remove TAG from DOCUMENT, or from the selected document."
+  (interactive)
+  (let* ((document (or document (papis-vui--current-document)))
+         (current (papis-document-tags document))
+         (tag (or tag
+                  (and current
+                       (completing-read "Remove tag: " current nil t)))))
+    (unless current
+      (user-error "Document \"%s\" has no tags"
+                  (papis-document-title document)))
+    (unless (member tag current)
+      (user-error "Document has no tag \"%s\"" tag))
+    (papis-vui--apply-tag document tag 'remove)))
+
 ;;; Major mode and entry point
 
 (defvar-keymap papis-vui-mode-map
@@ -975,6 +1079,8 @@ cancel."
   "c" #'papis-vui-copy-reference
   "e" #'papis-vui-edit-metadata
   "m" #'papis-vui-update-book-metadata
+  "t" #'papis-vui-add-tag
+  "T" #'papis-vui-remove-tag
   "D" #'papis-vui-delete-document)
 
 (defun papis-vui--revert (&rest _)

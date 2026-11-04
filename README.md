@@ -69,6 +69,8 @@ this Emacs.
 | `c`       | Copy a human-readable reference  |
 | `e`       | Manually edit the metadata       |
 | `m`       | Update EPUB/PDF metadata and rename |
+| `t`       | Add a tag to the selected document |
+| `T`       | Remove a tag from the selected document |
 | `D`       | Delete the selected document     |
 | `TAB`     | Move between buttons and fields  |
 | `q`       | Quit the window                  |
@@ -103,6 +105,22 @@ after `uv` is installed; PDF support additionally needs `exiftool` on
 `PATH` (for example `brew install exiftool`).  Customize
 `papis-book-metadata-script` to use a different script.
 
+`t` (or the **+ tag** button in the detail pane) adds a tag to the
+selected document, and `T` (or clicking a tag in the detail pane) removes one.
+`t` offers the presets in `papis-tags` — `reading` and `read` by default —
+together with the tags already used in the current library; any other tag can
+be typed as well.  Both commands run `papis tag --batch --all
+--doc-folder <folder>` (falling back to `papis_id:<id>`), so `info.yaml` and
+the Papis database are updated.  Because `papis serve` keeps its library in
+memory, a server started by Emacs is restarted afterwards so that it returns
+the new tags; a server started by another program cannot be restarted from
+here, so the change is only reflected in the frontend until that server is
+restarted.  Customize `papis-tags` to change the preset tags:
+
+```elisp
+(setq papis-tags '("reading" "read" "favorite"))
+```
+
 ## Papis API used by `papis.el`
 
 | Function                        | API endpoint |
@@ -112,6 +130,7 @@ after `uv` is installed; PDF support additionally needs `exiftool` on
 | `papis-documents` / `papis-query` | `GET /api/library/<library>/document[/<query>]` |
 | `papis-document-format`         | `GET /api/library/<library>/document/<query>/format/<format>` |
 | `papis-document-delete`         | `papis rm` on the command line (the server has no delete route) |
+| `papis-document-tag-add` / `papis-document-tag-remove` | `papis tag --add` / `--remove` on the command line |
 
 Documents are returned as `papis-document` structs with accessors such as
 `papis-document-title`, `papis-document-author`, `papis-document-files`,
