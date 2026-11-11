@@ -5,7 +5,7 @@
 ;; Author: Qiqi Jin <ginqi7@gmail.com>
 ;; Version: 0.1.0
 ;; URL: https://github.com/ginqi7/papis.el
-;; Package-Requires: ((emacs "29.1") (vui "1.4.0"))
+;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: bib, tex, tools
 
 ;; This program is free software; you can redistribute it and/or modify
@@ -43,7 +43,7 @@
 ;;       -> the result of `papis export' as a JSON string
 ;;
 ;; All functions in this file return plain Lisp data.  Nothing here
-;; knows about buffers, faces or VUI; that is `papis-vui.el'.
+;; knows about buffers or faces; `papis-etaf.el' renders them.
 ;;
 ;; The server is started on demand with `papis-start-server', which
 ;; runs `papis serve' as a child process.  If a server is already

@@ -543,6 +543,11 @@ page."
   error
   covers)
 
+(defvar papis-etaf--focused-document (etaf-ref nil)
+  "Book under the keyboard cursor in the gallery.
+Kept outside the session so reloading this file does not change the
+session structure of an already mounted gallery.")
+
 (defun papis-etaf--same-document-p (first second)
   "Return non-nil when FIRST and SECOND denote the same Papis document."
   (or (eq first second)
@@ -597,6 +602,7 @@ page."
             (etaf-set-value (papis-etaf--session-query session) query)
             (etaf-set-value (papis-etaf--session-documents session) documents)
             (etaf-set-value (papis-etaf--session-selected session) selected)
+            (etaf-set-value papis-etaf--focused-document nil)
             (etaf-set-value (papis-etaf--session-error session) nil)))
       (error
        (etaf-batch
@@ -604,6 +610,7 @@ page."
          (etaf-set-value (papis-etaf--session-query session) query)
          (etaf-set-value (papis-etaf--session-documents session) nil)
          (etaf-set-value (papis-etaf--session-selected session) nil)
+         (etaf-set-value papis-etaf--focused-document nil)
          (etaf-set-value (papis-etaf--session-error session)
                          (papis-error-message err)))))))
 
@@ -808,7 +815,7 @@ page."
    (list "/" #'papis-etaf-search "Search")
    (list "r" #'papis-etaf-refresh "Refresh")
    (list "g" #'papis-etaf-refresh "Refresh")
-   (list "l" #'papis-etaf-next-library "Next library")
+   (list "s" #'papis-etaf-next-library "Next library")
    (list "n" #'papis-etaf-next-document "Next document")
    (list "p" #'papis-etaf-previous-document "Previous document")
    (list "o" #'papis-etaf-open-file "Open file")
@@ -844,76 +851,92 @@ definition instead."
          (cover (papis-etaf--session-cover session document))
          (selected (etaf-value (papis-etaf--session-selected session)))
          (selected-p (papis-etaf--same-document-p document selected))
+         (focused (etaf-value papis-etaf--focused-document))
+         (focused-p (papis-etaf--same-document-p document focused))
+         (highlight-p (or selected-p focused-p))
          (select (lambda () (etaf-set-value
                              (papis-etaf--session-selected session)
                              document)))
+         (focus-in (lambda ()
+                     (etaf-set-value papis-etaf--focused-document document)))
+         (focus-out (lambda ()
+                      (when (papis-etaf--same-document-p
+                             document
+                             (etaf-value papis-etaf--focused-document))
+                        (etaf-set-value papis-etaf--focused-document nil))))
          (title-width (max 8 (floor (* columns 0.72))))
          (author-label (if (string-empty-p author)
                            (if (string-empty-p year-and-type)
                                "Unknown author"
                              year-and-type)
                          author))
-         (border (if selected-p
-                     (plist-get palette :accent)
-                   (plist-get palette :border))))
+         (border (list '(px 1) 'solid
+                       (if highlight-p
+                           (plist-get palette :accent)
+                         (plist-get palette :border))))
+         (background (cond (focused-p (plist-get palette :accent))
+                           (selected-p (plist-get palette :accent-soft))))
+         (title-color (cond (focused-p (plist-get palette :bg))
+                            (selected-p (plist-get palette :accent))
+                            (t (plist-get palette :link))))
+         (author-color (if focused-p
+                           (plist-get palette :bg)
+                         (plist-get palette :muted))))
     (etaf-view
-     (column :class "papis-etaf-book"
-             :width 'stretch
-             :item-gap '(lh 0)
-       (box :class "papis-etaf-cover-frame"
-            :position 'relative
-            :width 'stretch
-            :overflow 'hidden
-            :border (list '(px 1) 'solid border)
-            :background-color (plist-get palette :subtle)
-            :tab-index 0
-            :role 'button
-            :help-echo title
-            :on-press select
-         (image :if cover
-                :src cover :columns columns :rows rows
+     (box :class "papis-etaf-book"
+          :width 'stretch
+          :text-align 'center
+          :background-color background
+          :tab-index 0
+          :role 'button
+          :help-echo title
+          :on-press select
+          :on-focus-enter focus-in
+          :on-focus-leave focus-out
+       (column :class "papis-etaf-book-lines"
+               :width 'stretch
+               :item-gap '(lh 0)
+         (box :class "papis-etaf-cover-frame"
+              :position 'relative
+              :width 'stretch
+              :overflow 'hidden
+              :border border
+              :background-color (plist-get palette :subtle)
+              :on-press select
+           (image :if cover
+                  :src cover :columns columns :rows rows
+                  :on-press select)
+           (box :else t
+                :height (papis-etaf--lh rows)
+                :background-color (nth 0 (papis-etaf--cover-palette title))
                 :on-press select
-                :help-echo title)
-         (box :else t
-              :height (papis-etaf--lh rows)
-              :background-color (nth 0 (papis-etaf--cover-palette title))
-              :on-press select
-           (text :font-size 42
-                 :font-weight 'bold
-                 :color (nth 1 (papis-etaf--cover-palette title))
-                 (expr (substring title 0 (min 1 (length title))))))
-         (box :if tag
-              :position 'absolute
-              :left (papis-etaf--px 10)
-              :top (papis-etaf--lh (max 0 (- rows 2)))
-              :padding '((lh 0) (ch 1))
-              :background-color (plist-get palette :accent-soft)
-              :color (plist-get palette :accent)
-              :tab-index 0
-              :role 'button
-              :on-press select
-              :help-echo tag
-           (text :color (plist-get palette :accent)
-                 :font-weight 'bold
-                 :font-size 12
-                 (expr tag))))
-       (text :role 'button
-             :tab-index 0
-             :on-press select
-             :help-echo title
-             :color (if selected-p
-                        (plist-get palette :accent)
-                      (plist-get palette :link))
-             :font-size 16
-             :text-decoration-line (if selected-p '(underline) nil)
-             (expr (papis-etaf--truncate title title-width)))
-       (text :role 'button
-             :tab-index 0
-             :on-press select
-             :help-echo title
-             :color (plist-get palette :muted)
-             :font-size 13
-             (expr (papis-etaf--truncate author-label title-width)))))))
+             (text :font-size 42
+                   :font-weight 'bold
+                   :color (nth 1 (papis-etaf--cover-palette title))
+                   (expr (substring title 0 (min 1 (length title))))))
+           (box :if tag
+                :position 'absolute
+                :left (papis-etaf--px 10)
+                :top (papis-etaf--lh (max 0 (- rows 2)))
+                :padding '((lh 0) (ch 1))
+                :background-color (plist-get palette :accent-soft)
+                :color (plist-get palette :accent)
+                :on-press select
+             (text :color (plist-get palette :accent)
+                   :font-weight 'bold
+                   :font-size 12
+                   (expr tag))))
+         (text :color title-color
+               :font-size 16
+               :font-weight (if selected-p 'bold 'normal)
+               :text-decoration-line (if highlight-p '(underline) nil)
+               :on-press select
+               (expr (concat (if selected-p "> " "  ")
+                             (papis-etaf--truncate title (- title-width 2)))))
+         (text :color author-color
+               :font-size 13
+               :on-press select
+               (expr (papis-etaf--truncate author-label title-width))))))))
 
 (papis-etaf--defcomponent papis-etaf-app (&key session)
   :render
@@ -1014,7 +1037,7 @@ definition instead."
            (expr (if (string-empty-p query) "Search…" query)))
          (text :color (plist-get palette :muted)
                :font-size 12
-               "Press / to search · l next library · r refresh"))
+               "Press / to search · s next library · r refresh"))
        (box :if error
             :padding '((lh 1) (ch 2))
             :border (list '(px 1) 'solid (plist-get palette :danger-fg))
@@ -1129,6 +1152,7 @@ definition instead."
                    :selected (etaf-ref (car documents))
                    :error (etaf-ref error)
                    :covers (make-hash-table :test #'equal))))
+    (etaf-set-value papis-etaf--focused-document nil)
     (when documents
       (papis-etaf--prepare-covers session documents))
     (etaf-app-open

@@ -48,7 +48,11 @@
                 :to-equal '("abcde" "fghij" "kl")))
 
       (it "truncates with an ellipsis"
-        (expect (papis-etaf--truncate "abcdef" 4) :to-equal "ab…")
+        ;; U+2026 is one column in batch but two with some CJK fonts, so
+        ;; assert the width and the ellipsis instead of literal text.
+        (let ((truncated (papis-etaf--truncate "abcdef" 4)))
+          (expect (string-width truncated) :to-equal 4)
+          (expect (string-suffix-p "…" truncated) :to-be-truthy))
         (expect (papis-etaf--truncate "abc" 4) :to-equal "abc")))
 
     (describe "generated covers"

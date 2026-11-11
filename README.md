@@ -6,9 +6,6 @@ layers:
 - **`papis.el`** is a client for the JSON API exposed by `papis serve`.  It
   starts the server on demand, runs queries, and returns plain Lisp data.  It
   knows nothing about buffers, faces, or UI frameworks.
-- **`papis-vui.el`** consumes only the functions in `papis.el` and renders them
-  as a [vui.el](https://github.com/d12frosted/vui.el) interface: search,
-  library switching, tag filters, sorting, a document table, and a detail pane.
 - **`papis-etaf.el`** is an optional cover gallery built with
   [ETAF](https://etaf.top/introduction/).  It renders books as a responsive
   grid of covers, titles, authors and tag pills, with a selected-document
@@ -21,7 +18,6 @@ bug; it is never used in the normal path.
 
 - Emacs 29.1 or newer
 - Papis 0.16 or newer, with the `papis` executable on `exec-path`
-- [vui.el](https://github.com/d12frosted/vui.el) 1.4.0 or newer
 - [ETAF](https://etaf.top/introduction/) 0.3.5 or newer, only for
   `papis-etaf.el`
 - [ExifTool](https://exiftool.org) for updating PDF metadata (for example
@@ -40,7 +36,7 @@ ETAF is available from its own package archive:
 Put the `.el` files somewhere on `load-path`, then:
 
 ```elisp
-(require 'papis-vui)
+(require 'papis-etaf)
 
 ;; Optional
 (setq papis-server-port 8888)
@@ -50,21 +46,12 @@ Put the `.el` files somewhere on `load-path`, then:
 With `use-package`:
 
 ```elisp
-(use-package papis
-  :load-path "/path/to/papis.el"
-  :commands (papis-vui-open))
-
-(use-package papis-vui
-  :load-path "/path/to/papis.el"
-  :commands (papis-vui-open))
-
 (use-package papis-etaf
   :load-path "/path/to/papis.el"
   :commands (papis-etaf-open))
 ```
 
-Start the VUI frontend with `M-x papis-vui-open` (or `M-x papis-vui`), and the
-ETAF cover gallery with `M-x papis-etaf-open`.
+Start the ETAF cover gallery with `M-x papis-etaf-open`.
 
 If no server is listening on `papis-server-port`, `papis serve` is started as a
 child process and reused afterwards.  A server started by another program is
@@ -86,7 +73,7 @@ papis-etaf-clear-cover-cache` to rebuild it.
 |-----------|----------------------------------|
 | `/`       | Read a Papis query               |
 | `r`, `g`  | Reload the current query         |
-| `l`       | Switch to the next library       |
+| `s`       | Switch to the next library       |
 | `n`, `p`  | Select next / previous document  |
 | `RET`     | Activate the focused card        |
 | `o`       | Open the selected file           |
@@ -96,75 +83,6 @@ papis-etaf-clear-cover-cache` to rebuild it.
 | `b`       | Copy a BibTeX entry              |
 | `c`       | Copy a human-readable reference  |
 | `q`       | Quit the gallery                 |
-
-## Key bindings
-
-| Key       | Command                          |
-|-----------|----------------------------------|
-| `g`, `r`  | Reload the current query         |
-| `/`       | Read a Papis query               |
-| `l`       | Switch library                   |
-| `s`       | Choose the sort field            |
-| `n`, `p`  | Select next / previous document  |
-| `o`       | Open the selected file           |
-| `u`       | Open the selected document's URL |
-| `d`       | Open the document folder         |
-| `i`       | Open `info.yaml`                 |
-| `b`       | Copy a BibTeX entry              |
-| `c`       | Copy a human-readable reference  |
-| `e`       | Manually edit the metadata       |
-| `m`       | Update EPUB/PDF metadata and rename |
-| `t`       | Add a tag to the selected document |
-| `T`       | Remove a tag from the selected document |
-| `D`       | Delete the selected document     |
-| `TAB`     | Move between buttons and fields  |
-| `q`       | Quit the window                  |
-
-All metadata actions are also available as buttons in the detail pane.
-`D` (or the **Delete** button) asks for confirmation and then runs
-`papis rm --force --all --doc-folder <folder>` (falling back to
-`papis_id:<id>` when the folder is unknown), so the folder is removed from
-disk and cannot be recovered.  Because `papis rm` exits with status 0 even
-when it matches nothing, the folder is checked afterwards: if it is still
-there, the command fails with the exact `papis` command and output instead
-of pretending the document was deleted.  Set `papis-debug` to non-nil to
-log every `papis rm` invocation.
-
-`e` (or the **Edit** button) opens `info.yaml` in a dedicated
-`papis-vui-metadata-edit-mode` buffer for manual editing.  `C-c C-c`
-writes the metadata, updates and renames the EPUB or PDF when the document
-has one, refreshes the Papis cache and returns to the frontend; `C-c C-k`
-cancels.
-
-`m` (or the **Auto metadata** button) runs
-`scripts/papis_book_metadata.py` on the selected document's EPUB or PDF
-file.  For an EPUB the script reads the Dublin Core metadata; for a PDF it
-reads Title, Author and CreateDate through ExifTool.  It merges that with
-`info.yaml`, writes both back, renames the file to
-`author - title (year).epub` (or `.pdf`), and the frontend then refreshes
-the Papis cache (`papis cache update` for the document folder, or `papis
-cache update-newer` when the folder is unknown) so the server returns the
-new metadata.  The script uses `uv` (through its shebang) and declares its
-`ebooklib` and `pyyaml` dependencies itself, so no extra setup is needed
-after `uv` is installed; PDF support additionally needs `exiftool` on
-`PATH` (for example `brew install exiftool`).  Customize
-`papis-book-metadata-script` to use a different script.
-
-`t` (or the **+ tag** button in the detail pane) adds a tag to the
-selected document, and `T` (or clicking a tag in the detail pane) removes one.
-`t` offers the presets in `papis-tags` — `reading` and `read` by default —
-together with the tags already used in the current library; any other tag can
-be typed as well.  Both commands run `papis tag --batch --all
---doc-folder <folder>` (falling back to `papis_id:<id>`), so `info.yaml` and
-the Papis database are updated.  Because `papis serve` keeps its library in
-memory, a server started by Emacs is restarted afterwards so that it returns
-the new tags; a server started by another program cannot be restarted from
-here, so the change is only reflected in the frontend until that server is
-restarted.  Customize `papis-tags` to change the preset tags:
-
-```elisp
-(setq papis-tags '("reading" "read" "favorite"))
-```
 
 ## Papis API used by `papis.el`
 
