@@ -446,13 +446,14 @@ Force the message to be displayed before the next blocking call."
   "Render the document table of STATE."
   (let ((documents (papis-vui--sorted-documents state))
         (selected (papis-vui--selected-document state))
-        (title-width (max 20 (min 40 (- (papis-vui--width) 56)))))
+        (title-width (max 20 (min 40 (- (papis-vui--width) 62)))))
     (if (null documents)
         (vui-muted "No documents match the current query.")
       (vui-table
        :columns (list (list :header "Title" :min-width 20)
                       (list :header "Author" :min-width 12)
                       (list :header "Year" :width 6 :align :right)
+                      (list :header "Type" :width 6)
                       (list :header "Tags" :min-width 10))
        :rows
        (mapcar
@@ -460,6 +461,7 @@ Force the message to be displayed before the next blocking call."
           (let* ((current (eq document selected))
                  (title (papis-document-title document))
                  (author (papis-document-author document))
+                 (file-type (papis-document-file-type document))
                  (tags (string-join (papis-document-tags document) ", ")))
             (list
              (vui-button
@@ -471,6 +473,9 @@ Force the message to be displayed before the next blocking call."
               :on-click (lambda () (papis-vui--select-document document)))
              (papis-vui--truncate author 20)
              (papis-document-year-string document)
+             (if file-type
+                 (vui-text file-type :face 'bold)
+               (vui-muted "—"))
              (papis-vui--truncate tags 18))))
         documents)
        :border nil

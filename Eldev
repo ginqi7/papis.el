@@ -8,7 +8,9 @@
 
 (eldev-use-package-archive 'gnu-elpa)
 (eldev-use-package-archive 'melpa)
+(eldev-use-package-archive '("etaf" . "https://etaf.top/packages/") 50)
 
 (eldev-use-vc-repository 'vui :github "d12frosted/vui.el")
+(eldev-add-extra-dependencies '(compile test) 'etaf)
 
 (setq eldev-project-main-file "papis.el")

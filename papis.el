@@ -638,6 +638,19 @@ parsed by Emacs as symbols, so strings are interned for lookup."
   "Return the first attached file of DOCUMENT, or nil."
   (car (papis-document-files document)))
 
+(defun papis-document-file-type (document)
+  "Return the type of the attached files of DOCUMENT.
+
+The type is the upper-case extension of the first attached file
+that has one, e.g. \"PDF\" or \"EPUB\".  Return nil when no file
+type can be determined."
+  (seq-some (lambda (file)
+              (let ((extension (file-name-extension file)))
+                (and extension
+                     (not (string-empty-p extension))
+                     (upcase extension))))
+            (papis-document-files document)))
+
 (defun papis-document-directory (document)
   "Return the folder of DOCUMENT, or nil when it cannot be determined."
   (or (when-let* ((file (papis-document-file document)))

@@ -63,6 +63,7 @@
         (expect (papis-document-author document) :to-equal "A, B")
         (expect (papis-document-year-string document) :to-equal "2020")
         (expect (papis-document-file document) :to-equal "/tmp/a.pdf")
+        (expect (papis-document-file-type document) :to-equal "PDF")
         (expect (papis-document-directory document) :to-equal "/tmp/")
         (expect (papis-document-tags document) :to-equal '("lisp" "emacs"))))
 
@@ -75,6 +76,12 @@
     (it "falls back to the ref for the id"
       (let ((document (papis-test--document '((ref . "knuth84")))))
         (expect (papis-document-id document) :to-equal "knuth84")))
+
+    (it "reports no file type without an attached extension"
+      (let ((document (papis-test--document
+                       '((title . "No file")
+                         (files . ("/tmp/README"))))))
+        (expect (papis-document-file-type document) :to-be nil)))
 
     (it "orders fields for display"
       (let ((document (papis-test--document

@@ -1,6 +1,6 @@
 # papis.el
 
-An Emacs frontend for [Papis](https://github.com/papis/papis), split into two
+An Emacs frontend for [Papis](https://github.com/papis/papis), split into
 layers:
 
 - **`papis.el`** is a client for the JSON API exposed by `papis serve`.  It
@@ -9,6 +9,10 @@ layers:
 - **`papis-vui.el`** consumes only the functions in `papis.el` and renders them
   as a [vui.el](https://github.com/d12frosted/vui.el) interface: search,
   library switching, tag filters, sorting, a document table, and a detail pane.
+- **`papis-etaf.el`** is an optional cover gallery built with
+  [ETAF](https://etaf.top/introduction/).  It renders books as a responsive
+  grid of covers, titles, authors and tag pills, with a selected-document
+  action bar.
 
 `scripts/papis_dump.py` is a small fallback helper for a Papis 0.16 server
 bug; it is never used in the normal path.
@@ -18,12 +22,22 @@ bug; it is never used in the normal path.
 - Emacs 29.1 or newer
 - Papis 0.16 or newer, with the `papis` executable on `exec-path`
 - [vui.el](https://github.com/d12frosted/vui.el) 1.4.0 or newer
+- [ETAF](https://etaf.top/introduction/) 0.3.5 or newer, only for
+  `papis-etaf.el`
 - [ExifTool](https://exiftool.org) for updating PDF metadata (for example
   `brew install exiftool`)
+- Optional for cover thumbnails: `pdftoppm` (Poppler) or `mutool` renders the
+  first page of PDF books; EPUB covers are read directly from the archive
+
+ETAF is available from its own package archive:
+
+```elisp
+(add-to-list 'package-archives '("etaf" . "https://etaf.top/packages/"))
+```
 
 ## Setup
 
-Put the two `.el` files somewhere on `load-path`, then:
+Put the `.el` files somewhere on `load-path`, then:
 
 ```elisp
 (require 'papis-vui)
@@ -43,14 +57,45 @@ With `use-package`:
 (use-package papis-vui
   :load-path "/path/to/papis.el"
   :commands (papis-vui-open))
+
+(use-package papis-etaf
+  :load-path "/path/to/papis.el"
+  :commands (papis-etaf-open))
 ```
 
-Start the frontend with `M-x papis-vui-open` (or `M-x papis-vui`).
+Start the VUI frontend with `M-x papis-vui-open` (or `M-x papis-vui`), and the
+ETAF cover gallery with `M-x papis-etaf-open`.
 
 If no server is listening on `papis-server-port`, `papis serve` is started as a
 child process and reused afterwards.  A server started by another program is
 also reused.  Use `M-x papis-stop-server` to stop only the server started by
 this Emacs.
+
+## Cover gallery (ETAF)
+
+`M-x papis-etaf-open` opens `*papis-etaf*`, a responsive gallery of book
+covers.  Each card shows the cover, title, author and the first tag; selecting
+a card enables the open, folder, info, BibTeX and URL actions below the grid.
+Covers are extracted from EPUB metadata, rendered from the first PDF page when
+`pdftoppm` or `mutool` is available, or generated as an SVG cover from the
+document metadata.  The cache lives in `papis-etaf-cover-directory`
+(`~/.cache/papis/etaf-covers` by default); use `M-x
+papis-etaf-clear-cover-cache` to rebuild it.
+
+| Key       | Command                          |
+|-----------|----------------------------------|
+| `/`       | Read a Papis query               |
+| `r`, `g`  | Reload the current query         |
+| `l`       | Switch to the next library       |
+| `n`, `p`  | Select next / previous document  |
+| `RET`     | Activate the focused card        |
+| `o`       | Open the selected file           |
+| `u`       | Open the selected document's URL |
+| `d`       | Open the document folder         |
+| `i`       | Open `info.yaml`                 |
+| `b`       | Copy a BibTeX entry              |
+| `c`       | Copy a human-readable reference  |
+| `q`       | Quit the gallery                 |
 
 ## Key bindings
 
