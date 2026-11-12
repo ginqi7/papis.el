@@ -10,7 +10,7 @@
 ;;; Commentary:
 
 ;; These tests cover the rendering and cover helpers of `papis-etaf.el'
-;; that do not need a graphical frame or a running Papis server.  The
+;; that do not need a graphical frame or a running Papis executable.  The
 ;; whole file is skipped when ETAF is not installed.
 
 ;;; Code:
@@ -76,4 +76,5 @@
                (svg (papis-etaf--placeholder-svg document)))
           (expect (string-match-p "y=\"332\"" svg) :to-be-truthy)
           (expect (string-match-p "y=\"404\"" svg) :to-be-truthy))))))
+
 ;;; papis-etaf-test.el ends here

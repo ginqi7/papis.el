@@ -11,12 +11,14 @@
 from ebooklib import epub
 
 import json
+import posixpath
 import re
 import shutil
 import subprocess
 import sys
 import zipfile
 from pathlib import Path
+from urllib.parse import unquote
 from xml.sax.saxutils import escape
 
 import yaml
@@ -185,7 +187,8 @@ def set_opf_metadata(opf, updates):
     return opf
 
 
-def rewrite_zip(path, replacements):
+def rewrite_zip(path, replacements, additions=None):
+    additions = additions or {}
     tmp = path.with_name(path.name + ".tmp")
     with zipfile.ZipFile(path) as src, zipfile.ZipFile(tmp, "w") as dst:
         for item in src.infolist():
@@ -193,6 +196,8 @@ def rewrite_zip(path, replacements):
             if data is None:
                 data = src.read(item.filename)
             dst.writestr(item, data)
+        for name, data in additions.items():
+            dst.writestr(name, data)
     tmp.replace(path)
 
 
@@ -214,6 +219,220 @@ def update_epub_metadata(path, updates):
         return False
     rewrite_zip(path, {opf_name: new_opf.encode("utf-8")})
     return True
+
+
+# --- epub cover embedding ---
+
+# image magic -> (EPUB media type, file extension)
+COVER_TYPES = (
+    (b"\x89PNG\r\n\x1a\n", "image/png", "png"),
+    (b"\xff\xd8\xff", "image/jpeg", "jpg"),
+    (b"GIF87a", "image/gif", "gif"),
+    (b"GIF89a", "image/gif", "gif"),
+)
+
+
+def cover_image_type(data):
+    """Return (MEDIA-TYPE, EXTENSION) for an image, or (None, None)."""
+    for magic, media, extension in COVER_TYPES:
+        if data.startswith(magic):
+            return media, extension
+    return None, None
+
+
+def tag_attr(tag, name):
+    """Return the value of attribute NAME in a single XML TAG, or None."""
+    match = re.search(rf'\b{re.escape(name)}\s*=\s*"([^"]*)"', tag)
+    return match.group(1) if match else None
+
+
+def opf_items(opf):
+    """Return the `<item ...>' tags of an OPF document."""
+    return re.findall(r"<item\b[^>]*>", opf)
+
+
+def opf_cover_item(opf):
+    """Return the manifest item that currently represents the cover, or None."""
+    items = opf_items(opf)
+    for meta_tag in re.findall(r"<meta\b[^>]*>", opf):
+        if (tag_attr(meta_tag, "name") or "").lower() == "cover":
+            cover_id = tag_attr(meta_tag, "content")
+            for item in items:
+                if tag_attr(item, "id") == cover_id:
+                    return item
+    for item in items:
+        if "cover-image" in (tag_attr(item, "properties") or "").split():
+            return item
+    for item in items:
+        media = tag_attr(item, "media-type") or ""
+        href = tag_attr(item, "href") or ""
+        if media.startswith("image/") and "cover" in href.lower():
+            return item
+    return None
+
+
+def opf_set_cover_meta(opf, cover_id):
+    """Point the OPF `<meta name="cover">' entry at COVER-ID."""
+    updated = False
+
+    def repl(match):
+        nonlocal updated
+        tag = match.group(0)
+        if (tag_attr(tag, "name") or "").lower() != "cover":
+            return tag
+        updated = True
+        if re.search(r'\bcontent="[^"]*"', tag):
+            return re.sub(
+                r'\bcontent="[^"]*"',
+                f'content="{escape(cover_id)}"',
+                tag,
+                count=1,
+            )
+        if tag.endswith("/>"):
+            return tag[:-2] + f' content="{escape(cover_id)}"/>'
+        return tag[:-1] + f' content="{escape(cover_id)}">'
+
+    new_opf = re.sub(r"<meta\b[^>]*>", repl, opf)
+    if updated:
+        return new_opf
+    if "</metadata>" not in new_opf:
+        return new_opf
+    return new_opf.replace(
+        "</metadata>",
+        f'    <meta name="cover" content="{escape(cover_id)}"/>\n  </metadata>',
+        1,
+    )
+
+
+def opf_set_cover_property(opf, cover_id):
+    """Add `properties="cover-image"' to the manifest item COVER-ID."""
+    def repl(match):
+        tag = match.group(0)
+        if tag_attr(tag, "id") != cover_id:
+            return tag
+        properties = (tag_attr(tag, "properties") or "").split()
+        if "cover-image" in properties:
+            return tag
+        properties.append("cover-image")
+        value = " ".join(properties)
+        if re.search(r'\bproperties="[^"]*"', tag):
+            return re.sub(
+                r'\bproperties="[^"]*"',
+                f'properties="{value}"',
+                tag,
+                count=1,
+            )
+        if tag.endswith("/>"):
+            return tag[:-2] + f' properties="{value}"/>'
+        return tag[:-1] + f' properties="{value}">'
+
+    return re.sub(r"<item\b[^>]*>", repl, opf)
+
+
+def opf_clear_cover_property(opf, keep_id):
+    """Remove `cover-image' from every manifest item except KEEP-ID."""
+    def repl(match):
+        tag = match.group(0)
+        if tag_attr(tag, "id") == keep_id:
+            return tag
+        properties = (tag_attr(tag, "properties") or "").split()
+        if "cover-image" not in properties:
+            return tag
+        properties = [item for item in properties if item != "cover-image"]
+        if properties:
+            return re.sub(
+                r'\bproperties="[^"]*"',
+                f'properties="{" ".join(properties)}"',
+                tag,
+                count=1,
+            )
+        return re.sub(r'\s+properties="[^"]*"', "", tag, count=1)
+
+    return re.sub(r"<item\b[^>]*>", repl, opf)
+
+
+def opf_unique_id(opf, base):
+    """Return BASE, or BASE-N, as a manifest id not used in OPF."""
+    ids = {tag_attr(item, "id") for item in opf_items(opf)}
+    candidate = base
+    number = 1
+    while candidate in ids:
+        candidate = f"{base}-{number}"
+        number += 1
+    return candidate
+
+
+def zip_entry_name(opf_name, href):
+    """Return the archive entry for OPF-relative HREF."""
+    return posixpath.normpath(
+        posixpath.join(posixpath.dirname(opf_name), unquote(href))
+    )
+
+
+def embed_epub_cover(path, image_path):
+    """Write IMAGE-PATH into the EPUB at PATH as its cover.
+
+    Return True when the archive was rewritten.  The existing cover item
+    is reused when its media type matches; otherwise a new manifest item
+    is added and the OPF `cover' meta is pointed at it.
+    """
+    data = Path(image_path).read_bytes()
+    media, extension = cover_image_type(data)
+    if not media:
+        print(f"skip cover: {image_path} is not a PNG, JPEG or GIF image")
+        return False
+    with zipfile.ZipFile(path) as zf:
+        opf_name = find_opf(zf)
+        if not opf_name:
+            print("no OPF found in epub, skipping cover update")
+            return False
+        opf = zf.read(opf_name).decode("utf-8")
+        names = set(zf.namelist())
+        cover_item = opf_cover_item(opf)
+        replacements = {}
+        additions = {}
+        if cover_item is not None:
+            cover_id = tag_attr(cover_item, "id")
+            href = tag_attr(cover_item, "href")
+            entry = zip_entry_name(opf_name, href) if href else None
+            if (entry and entry in names
+                    and tag_attr(cover_item, "media-type") == media):
+                replacements[entry] = data
+                new_opf = opf_set_cover_meta(opf, cover_id)
+                new_opf = opf_set_cover_property(new_opf, cover_id)
+                new_opf = opf_clear_cover_property(new_opf, cover_id)
+                if new_opf != opf:
+                    replacements[opf_name] = new_opf.encode("utf-8")
+                if zf.read(entry) == data and new_opf == opf:
+                    return False
+                rewrite_zip(path, replacements)
+                return True
+        cover_id = opf_unique_id(opf, "cover-image")
+        name = f"cover.{extension}"
+        number = 1
+        while posixpath.join(posixpath.dirname(opf_name), name) in names:
+            name = f"cover-{number}.{extension}"
+            number += 1
+        entry = posixpath.normpath(
+            posixpath.join(posixpath.dirname(opf_name), name)
+        )
+        new_opf = opf.replace(
+            "</manifest>",
+            f'    <item id="{escape(cover_id)}" href="{escape(name)}" '
+            f'media-type="{media}" properties="cover-image"/>\n  </manifest>',
+            1,
+        )
+        if new_opf == opf:
+            print("no manifest found in epub, skipping cover update")
+            return False
+        new_opf = opf_set_cover_meta(new_opf, cover_id)
+        new_opf = opf_clear_cover_property(new_opf, cover_id)
+        rewrite_zip(
+            path,
+            {opf_name: new_opf.encode("utf-8")},
+            {entry: data},
+        )
+        return True
 
 
 # --- pdf metadata through exiftool ---
@@ -328,11 +547,41 @@ def write_fields(path, kind, updates):
     return update_pdf_metadata(path, updates)
 
 
+def parse_args(argv):
+    """Return (FILES, COVER) after removing the --embed-cover option."""
+    args = list(argv[1:])
+    cover = None
+    if "--embed-cover" in args:
+        index = args.index("--embed-cover")
+        if index + 1 >= len(args):
+            sys.exit("--embed-cover needs an image file")
+        cover = Path(args[index + 1])
+        del args[index:index + 2]
+    return args, cover
+
+
 def main():
-    if len(sys.argv) < 2:
+    args, cover = parse_args(sys.argv)
+    if cover is not None:
+        if len(args) != 1:
+            sys.exit(
+                "usage: papis_book_metadata.py --embed-cover IMAGE <file.epub>"
+            )
+        path = Path(args[0])
+        if path.suffix.lower() != ".epub":
+            sys.exit("--embed-cover supports only EPUB files")
+        if not cover.is_file():
+            sys.exit(f"cover image not found: {cover}")
+        if embed_epub_cover(path, cover):
+            print(f"epub cover updated: {path}")
+        else:
+            print("epub cover unchanged")
+        return
+
+    if len(args) != 1:
         sys.exit("usage: papis_book_metadata.py <file.epub|file.pdf>")
 
-    path = Path(sys.argv[1])
+    path = Path(args[0])
     kind = file_kind(path)
     print(path)
     fields = read_fields(path, kind)

@@ -10,8 +10,8 @@
 ;;; Commentary:
 
 ;; These tests cover the parts of papis.el that do not need a running
-;; Papis server: JSON parsing, document accessors, query paths, sorting
-;; and cleanup of CLI output.
+;; Papis executable: JSON parsing, document accessors, sorting and
+;; cleanup of CLI output.
 
 ;;; Code:
 
@@ -80,19 +80,34 @@
         (expect (mapcar #'car (papis-document-fields document))
                 :to-equal '("title" "author" "year" "publisher")))))
 
-  (describe "queries"
-    (it "builds the all-documents path"
-      (expect (papis--document-path "books" "")
-              :to-equal "/api/library/books/document"))
+  (describe "CLI backend"
+    (it "lists libraries from `papis list --libraries'"
+      (cl-letf (((symbol-function 'papis--call-cli)
+                 (lambda (arguments)
+                   (expect arguments :to-equal '("list" "--libraries"))
+                   "books /tmp/books\npapers /tmp/papers\n")))
+        (expect (papis--libraries-via-cli)
+                :to-equal '("books" "papers"))))
 
-    (it "encodes query characters"
-      (expect (papis--document-path "books" "author:knuth year:1984")
-              :to-equal
-              "/api/library/books/document/author%3Aknuth%20year%3A1984"))
+    (it "returns the path of a library"
+      (cl-letf (((symbol-function 'papis--call-cli)
+                 (lambda (_arguments)
+                   "books /tmp/books\npapers /tmp/papers\n")))
+        (expect (papis--library-via-cli "papers")
+                :to-equal '(:name "papers" :path "/tmp/papers"))))
 
-    (it "encodes library names"
-      (expect (papis--document-path "my books" "")
-              :to-equal "/api/library/my%20books/document")))
+    (it "uses the CLI for documents"
+      (cl-letf (((symbol-function 'papis--documents-via-python)
+                 (lambda (library query) (list library query))))
+        (expect (papis-documents "books" "author:knuth")
+                :to-equal '("books" "author:knuth"))))
+
+    (it "uses the CLI for exports"
+      (cl-letf (((symbol-function 'papis--call-cli)
+                 (lambda (arguments) (format "%S" arguments))))
+        (expect (papis-document-format "books" "papis_id:abc" "json")
+                :to-equal
+                "(\"-l\" \"books\" \"export\" \"--batch\" \"--all\" \"-f\" \"json\" \"papis_id:abc\")"))))
 
   (describe "deleting"
     (it "builds `papis rm' arguments from the document id"
@@ -196,8 +211,11 @@
                          (title . "A Title")
                          (tags . ("old")))
                        "books"))
-            (arguments nil))
-        (cl-letf (((symbol-function 'papis--call-cli-result)
+            (arguments nil)
+            (refreshed nil))
+        (cl-letf (((symbol-function 'papis-document-refresh-cache)
+                   (lambda (doc) (setq refreshed doc)))
+                  ((symbol-function 'papis--call-cli-result)
                    (lambda (args)
                      (setq arguments args)
                      (list :status 0 :stdout "" :stderr ""))))
@@ -207,7 +225,8 @@
                               "papis_id:abc123"
                               "--add" "reading"))
           (expect (papis-document-tags document)
-                  :to-equal '("old" "reading")))))
+                  :to-equal '("old" "reading"))
+          (expect refreshed :to-be document))))
 
     (it "does not duplicate a tag that is already there"
       (let ((document (papis-test--document
@@ -246,19 +265,114 @@
                            :stderr "'tags' field does not contain 'missing'\n"))))
           (expect (papis-document-tag-remove document "missing")
                   :to-throw 'papis-error)
-          (expect (papis-document-tags document) :to-equal '("old")))))
+          (expect (papis-document-tags document) :to-equal '("old"))))))
 
-    (it "restarts only a server started by this Emacs"
-      (cl-letf (((symbol-function 'process-live-p)
-                 (lambda (_process) nil))
-                ((symbol-function 'papis-restart-server)
-                 (lambda () (error "must not restart"))))
-        (expect (papis-document-restart-server) :to-be nil))
-      (cl-letf (((symbol-function 'process-live-p)
-                 (lambda (_process) t))
-                ((symbol-function 'papis-restart-server)
-                 (lambda () 'restarted)))
-        (expect (papis-document-restart-server) :to-be-truthy))))
+  (describe "metadata updates"
+    (it "reads an ISBN from a string or a list"
+      (let ((document (papis-test--document
+                       '((title . "A Book")
+                         (isbn . ("0262560992" "9780262560993"))))))
+        (expect (papis-document-isbn document) :to-equal "0262560992"))
+      (expect (papis-document-isbn
+               (papis-test--document '((title . "A Book")
+                                       (isbn . "9780262560993"))))
+              :to-equal "9780262560993")
+      (expect (papis-document-isbn
+               (papis-test--document '((title . "A Book"))))
+              :to-be nil))
+
+    (it "builds `papis update' arguments from the document folder"
+      (let ((document (papis-test--document
+                       '((papis_id . "abc123")
+                         (title . "A Title")
+                         (_papis_local_folder . "/tmp/books/a-title")))))
+        (expect (papis-document-update-arguments
+                 document
+                 (list (cons "title" "New Title")
+                       (cons 'year "2000")))
+                :to-equal '("-l" "books" "update" "--batch" "--all"
+                            "--doc-folder" "/tmp/books/a-title/"
+                            "--set" "title" "New Title"
+                            "--set" "year" "2000"))))
+
+    (it "falls back to the document id"
+      (let ((document (papis-test--document
+                       '((papis_id . "abc123")
+                         (title . "A Title")))))
+        (expect (papis-document-update-arguments
+                 document (list (cons "title" "A Title")))
+                :to-equal '("-l" "books" "update" "--batch" "--all"
+                            "papis_id:abc123"
+                            "--set" "title" "A Title"))))
+
+    (it "updates the document in memory and skips empty values"
+      (let ((document (papis-test--document
+                       '((papis_id . "abc123")
+                         (title . "Old Title")
+                         (year . 1990))))
+            (arguments nil)
+            (refreshed nil))
+        (cl-letf (((symbol-function 'papis-document-refresh-cache)
+                   (lambda (doc) (setq refreshed doc)))
+                  ((symbol-function 'papis--call-cli-result)
+                   (lambda (args)
+                     (setq arguments args)
+                     (list :status 0 :stdout "" :stderr ""))))
+          (papis-document-update
+           document (list (cons "title" "New Title")
+                          (cons "author" "A. Writer")
+                          (cons "publisher" nil)))
+          (expect arguments
+                  :to-equal '("-l" "books" "update" "--batch" "--all"
+                              "papis_id:abc123"
+                              "--set" "title" "New Title"
+                              "--set" "author" "A. Writer"))
+          (expect (papis-document-title document) :to-equal "New Title")
+          (expect (papis-document-author document) :to-equal "A. Writer")
+          (expect (papis-document-year document) :to-equal 1990)
+          (expect refreshed :to-be document))))
+
+    (it "builds `papis update' arguments that append a file"
+      (let ((document (papis-test--document
+                       '((papis_id . "abc123")
+                         (title . "A Title")
+                         (_papis_local_folder . "/tmp/books/a-title")))))
+        (expect (papis-document-add-file-arguments document "cover.jpg")
+                :to-equal '("-l" "books" "update" "--batch" "--all"
+                            "--doc-folder" "/tmp/books/a-title/"
+                            "--append" "files" "cover.jpg"))))
+
+    (it "attaches a file and updates the document in memory"
+      (let ((document (papis-test--document
+                       '((papis_id . "abc123")
+                         (title . "A Title")
+                         (files . ("book.pdf"))
+                         (_papis_local_folder . "/tmp/books/a-title"))))
+            (arguments nil)
+            (refreshed nil))
+        (cl-letf (((symbol-function 'papis-document-refresh-cache)
+                   (lambda (doc) (setq refreshed doc)))
+                  ((symbol-function 'papis--call-cli-result)
+                   (lambda (args)
+                     (setq arguments args)
+                     (list :status 0 :stdout "" :stderr ""))))
+          (expect (papis-document-add-file document "cover.jpg")
+                  :to-equal "cover.jpg")
+          (expect arguments
+                  :to-equal '("-l" "books" "update" "--batch" "--all"
+                              "--doc-folder" "/tmp/books/a-title/"
+                              "--append" "files" "cover.jpg"))
+          (expect (papis-document-files document)
+                  :to-equal '("book.pdf" "cover.jpg"))
+          (expect refreshed :to-be document))))
+
+    (it "copies a document without sharing metadata"
+      (let* ((original (papis-test--document
+                        '((title . "Old Title") (tags . ("a")))))
+             (copy (papis-document-copy original)))
+        (papis--document-set-field copy "title" "New Title")
+        (expect (papis-document-title original) :to-equal "Old Title")
+        (expect (papis-document-title copy) :to-equal "New Title"))))
 
   (describe "book metadata"
     (it "finds the EPUB and PDF files of a document"
@@ -270,6 +384,83 @@
         (expect (papis-document-book-files document)
                 :to-equal '("/tmp/a.pdf" "/tmp/b.EPUB" "/tmp/c.epub"
                             "/tmp/d.PDF"))))
+
+    (it "finds the EPUB file of a document"
+      (let* ((folder (make-temp-file "papis-book-" t))
+             (pdf (expand-file-name "a.pdf" folder))
+             (epub (expand-file-name "b.epub" folder))
+             (document (papis-test--document
+                        `((title . "A Book")
+                          (files . ("a.pdf" "b.epub"))
+                          (_papis_local_folder . ,folder)))))
+        (unwind-protect
+            (progn
+              (write-region "" nil pdf)
+              (write-region "" nil epub)
+              (expect (papis-document-epub-file document) :to-equal epub))
+          (delete-directory folder t))))
+
+    (it "finds a renamed EPUB in the document folder"
+      (let* ((folder (make-temp-file "papis-book-" t))
+             (epub (expand-file-name "New Name.epub" folder))
+             (document (papis-test--document
+                        `((title . "A Book")
+                          (files . ("old-name.epub"))
+                          (_papis_local_folder . ,folder)))))
+        (unwind-protect
+            (progn
+              (write-region "" nil epub)
+              (expect (papis-document-epub-file document) :to-equal epub))
+          (delete-directory folder t))))
+
+    (it "builds an embed-cover command"
+      (let ((script (make-temp-file "papis-metadata-" nil ".py")))
+        (unwind-protect
+            (progn
+              (set-file-modes script #o755)
+              (let ((papis-book-metadata-script script))
+                (expect (papis-document-embed-cover-command
+                         "book.epub" "cover.jpg")
+                        :to-equal (list script "--embed-cover"
+                                        "cover.jpg" "book.epub"))))
+          (delete-file script))))
+
+    (it "embeds a cover in the document EPUB"
+      (let* ((folder (make-temp-file "papis-embed-" t))
+             (epub (expand-file-name "book.epub" folder))
+             (cover (expand-file-name "cover.jpg" folder))
+             (document (papis-test--document
+                        `((title . "A Book")
+                          (files . (,epub ,cover))))))
+        (unwind-protect
+            (progn
+              (write-region "" nil epub)
+              (write-region "" nil cover)
+              (let ((command nil))
+                (cl-letf (((symbol-function 'papis--run-metadata-command)
+                           (lambda (arguments)
+                             (setq command arguments)
+                             "epub cover updated")))
+                  (expect (papis-document-embed-cover document cover)
+                          :to-equal "epub cover updated")
+                  (expect (nth 1 command) :to-equal "--embed-cover")
+                  (expect (nth 3 command) :to-equal epub))))
+          (delete-directory folder t))))
+
+    (it "refuses to embed a cover without an EPUB"
+      (let ((document (papis-test--document
+                       '((title . "A Paper")
+                         (files . ("/tmp/paper.pdf"))))))
+        (expect (papis-document-embed-cover document "/tmp/cover.jpg")
+                :to-throw 'user-error)))
+
+    (it "resolves relative book files against the document folder"
+      (let ((document (papis-test--document
+                       '((title . "A Book")
+                         (files . ("book.epub"))
+                         (_papis_local_folder . "/tmp/books/a-book")))))
+        (expect (papis-document-book-files document)
+                :to-equal '("/tmp/books/a-book/book.epub"))))
 
     (it "runs an executable metadata script directly"
       (let ((script (make-temp-file "papis-book-metadata-" nil ".py")))
@@ -348,7 +539,36 @@
                         :to-equal "renamed: book.pdf -> a-book.pdf")
                 (expect ran :to-equal file)
                 (expect refreshed :to-be document)))
-          (delete-directory folder t)))))
+          (delete-directory folder t))))
+
+    (it "runs the metadata script for a chosen document"
+      (let ((document (papis-test--document '((title . "A Book")) "books"))
+            (ran nil))
+        (cl-letf (((symbol-function 'papis-read-document)
+                   (lambda (&rest _) document))
+                  ((symbol-function 'papis-document-update-book-metadata)
+                   (lambda (doc) (setq ran doc) "renamed")))
+          (expect (papis-update-book-metadata document) :to-equal "renamed")
+          (expect ran :to-be document))))
+
+    (it "prompts for a library and document"
+      (let* ((document (papis-test--document
+                        '((title . "A Book") (author . "A Writer"))
+                        "books"))
+             (prompts nil))
+        (cl-letf (((symbol-function 'papis-libraries)
+                   (lambda () '("books" "papers")))
+                  ((symbol-function 'papis-documents)
+                   (lambda (&rest _) (list document)))
+                  ((symbol-function 'completing-read)
+                   (lambda (prompt collection &rest _)
+                     (push prompt prompts)
+                     (if (equal prompt "Library: ")
+                         "books"
+                       (caar collection)))))
+          (expect (papis-read-document) :to-be document)
+          (expect (nreverse prompts)
+                  :to-equal '("Library: " "Document: "))))))
 
   (describe "manual metadata editing"
     (it "syncs an EPUB or PDF after an edit and otherwise refreshes the cache"
@@ -366,7 +586,10 @@
                     "books"))
              (synced nil)
              (refreshed nil))
-        (cl-letf (((symbol-function 'papis-document-update-book-metadata)
+        (cl-letf (((symbol-function 'papis-document--existing-book-files)
+                   (lambda (document)
+                     (papis-document-book-files document)))
+                  ((symbol-function 'papis-document-update-book-metadata)
                    (lambda (doc)
                      (setq synced doc)
                      (setq refreshed nil)
@@ -387,8 +610,8 @@
   (describe "errors and CLI output"
     (it "prints a custom error without the data quotes"
       (expect (papis-error-message
-               '(papis-server-error "server is down"))
-              :to-equal "server is down"))
+               '(papis-error "papis is down"))
+              :to-equal "papis is down"))
 
     (it "removes Papis warnings and log lines from CLI output"
       (expect (papis--clean-cli-output

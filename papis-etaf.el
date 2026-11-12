@@ -39,6 +39,7 @@
 (require 'subr-x)
 (require 'url-util)
 (require 'papis)
+(require 'papis-openlibrary)
 (require 'etaf)
 
 (defgroup papis-etaf nil
@@ -736,6 +737,75 @@ session structure of an already mounted gallery.")
      (kill-new (papis-document-citation document))
      (message "Copied reference for %s" (papis-document-title document)))))
 
+;;; Open Library metadata
+
+(defun papis-etaf--replace-document (session document)
+  "Replace DOCUMENT in SESSION with a copy and return the copy.
+
+A card only re-renders when its document object changes, so metadata
+edited in place needs a fresh object."
+  (let* ((updated (papis-document-copy document))
+         (documents (etaf-value (papis-etaf--session-documents session)))
+         (selected (etaf-value (papis-etaf--session-selected session)))
+         (focused (etaf-value papis-etaf--focused-document))
+         (replaced (mapcar (lambda (each)
+                             (if (papis-etaf--same-document-p each document)
+                                 updated
+                               each))
+                           documents)))
+    (etaf-batch
+      (etaf-set-value (papis-etaf--session-documents session) replaced)
+      (when (papis-etaf--same-document-p selected document)
+        (etaf-set-value (papis-etaf--session-selected session) updated))
+      (when (papis-etaf--same-document-p focused document)
+        (etaf-set-value papis-etaf--focused-document updated)))
+    updated))
+
+(defun papis-etaf-find-metadata ()
+  "Look up the selected book on Open Library and apply its metadata."
+  (interactive)
+  (let* ((session (papis-etaf--app-session))
+         (document (or (papis-etaf--current-document session)
+                       (user-error "No book is selected")))
+         (fields (papis-openlibrary-metadata-for-document document)))
+    (when fields
+      (papis-document-update document fields)
+      (papis-etaf--replace-document session document)
+      (message "Updated \"%s\" from Open Library"
+               (papis-document-title document)))))
+
+(defun papis-etaf-update-book-metadata ()
+  "Update the selected book's file metadata with the metadata script."
+  (interactive)
+  (let* ((session (papis-etaf--app-session))
+         (document (or (papis-etaf--current-document session)
+                       (user-error "No book is selected"))))
+    (condition-case err
+        (progn
+          (papis-update-book-metadata document)
+          (papis-etaf--reload session)
+          (message "Updated the file metadata of \"%s\""
+                   (papis-document-title document)))
+      (error
+       (message "Papis: %s" (papis-error-message err))))))
+
+(defun papis-etaf-set-cover ()
+  "Search Open Library for a cover of the selected book and attach it."
+  (interactive)
+  (let* ((session (papis-etaf--app-session))
+         (document (or (papis-etaf--current-document session)
+                       (user-error "No book is selected"))))
+    (condition-case err
+        (when-let* ((cover (papis-openlibrary-set-cover document)))
+          (papis-etaf--replace-document session document)
+          (papis-etaf--prepare-covers
+           session (etaf-value (papis-etaf--session-documents session)))
+          (message "Added %s to \"%s\""
+                   (file-name-nondirectory cover)
+                   (papis-document-title document)))
+      (error
+       (message "Papis: %s" (papis-error-message err))))))
+
 ;;; Rendering helpers
 
 (defun papis-etaf--px (value)
@@ -822,6 +892,9 @@ session structure of an already mounted gallery.")
    (list "u" #'papis-etaf-open-url "Open URL")
    (list "d" #'papis-etaf-open-directory "Open folder")
    (list "i" #'papis-etaf-open-info "Open info file")
+   (list "m" #'papis-etaf-find-metadata "Find metadata")
+   (list "C" #'papis-etaf-set-cover "Find cover")
+   (list "M" #'papis-etaf-update-book-metadata "Update file metadata")
    (list "b" #'papis-etaf-copy-bibtex "Copy BibTeX")
    (list "c" #'papis-etaf-copy-reference "Copy reference")
    (list "q" #'etaf-app-close "Quit")))
@@ -858,7 +931,9 @@ definition instead."
                              (papis-etaf--session-selected session)
                              document)))
          (focus-in (lambda ()
-                     (etaf-set-value papis-etaf--focused-document document)))
+                     (etaf-set-value papis-etaf--focused-document document)
+                     (etaf-set-value (papis-etaf--session-selected session)
+                                     document)))
          (focus-out (lambda ()
                       (when (papis-etaf--same-document-p
                              document
@@ -1102,6 +1177,18 @@ definition instead."
                       (papis-etaf--call #'papis-document-open-info selected))
                     nil))
              (expr (papis-etaf--action-button
+                    "Metadata"
+                    (lambda () (papis-etaf-find-metadata))
+                    nil))
+             (expr (papis-etaf--action-button
+                    "Cover"
+                    (lambda () (papis-etaf-set-cover))
+                    nil))
+             (expr (papis-etaf--action-button
+                    "File metadata"
+                    (lambda () (papis-etaf-update-book-metadata))
+                    nil))
+             (expr (papis-etaf--action-button
                     "BibTeX"
                     (lambda ()
                       (papis-etaf--call #'papis-etaf--copy-bibtex-entry
@@ -1114,7 +1201,7 @@ definition instead."
                     (null (papis-document-url selected)))))))
        (text :color (plist-get palette :muted)
              :font-size 12
-             "RET or click a card to select · o open · d folder · i info · b BibTeX · q quit")))))
+             "Move or click a card to select · o open · d folder · i info · m OL metadata · C cover · M file metadata · b BibTeX · q quit")))))
 
 ;;; Entry point
 

@@ -1,4 +1,4 @@
-;;; papis.el --- Talk to the Papis API  -*- lexical-binding: t; -*-
+;;; papis.el --- Talk to Papis from Emacs  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026  Qiqi Jin
 
@@ -24,48 +24,24 @@
 ;;; Commentary:
 
 ;; This file is the low-level half of the Emacs frontend for
-;; https://github.com/papis/papis.  It talks to the JSON API that
-;; `papis serve' exposes:
-;;
-;;   GET /api/library
-;;       -> ["books", "papers"]
-;;
-;;   GET /api/library/<library>
-;;       -> {"name": "books", "path": "/home/me/Documents/books"}
-;;
-;;   GET /api/library/<library>/document
-;;       -> [{"title": "...", "author": "...", ...}, ...]
-;;
-;;   GET /api/library/<library>/document/<query>
-;;       -> documents matching a Papis query, e.g. "author:knuth"
-;;
-;;   GET /api/library/<library>/document/<query>/format/<exporter>
-;;       -> the result of `papis export' as a JSON string
+;; https://github.com/papis/papis.  It reads through the `papis'
+;; executable: `papis exec' runs `scripts/papis_dump.py', which returns
+;; documents as JSON, and libraries come from `papis list --libraries'.
+;; Writes use CLI commands as well (rm, tag, update, cache).
 ;;
 ;; All functions in this file return plain Lisp data.  Nothing here
 ;; knows about buffers or faces; `papis-etaf.el' renders them.
 ;;
-;; The server is started on demand with `papis-start-server', which
-;; runs `papis serve' as a child process.  If a server is already
-;; listening on `papis-server-port' it is reused.
+;; `scripts/papis_dump.py' serializes documents with `default=str', so
+;; YAML `date' values parsed as date objects do not break the JSON
+;; output.
 ;;
-;; A note on Papis 0.16: the server can fail to serialize documents
-;; whose YAML `date' field was parsed as a date object.  In that case
-;; the API returns an error ("Object of type date is not JSON
-;; serializable").  When `papis-fallback-to-cli' is non-nil (the
-;; default), `papis-documents' works around this: it first runs the
-;; small `scripts/papis_dump.py' helper through `papis exec' (using Papis'
-;; Python API with `default=str' JSON serialization), and if that is
-;; unavailable, lists the matching ids and fetches each document
-;; through the HTTP API by id.
-
 ;;; Code:
 
 (require 'cl-lib)
 (require 'json)
 (require 'seq)
 (require 'subr-x)
-(require 'url)
 
 (defgroup papis nil
   "Emacs frontend for Papis."
@@ -75,8 +51,6 @@
 ;;; Errors
 
 (define-error 'papis-error "Papis error")
-(define-error 'papis-http-error "Papis HTTP error" 'papis-error)
-(define-error 'papis-server-error "Papis server error" 'papis-error)
 
 (defun papis-error-message (error)
   "Return a clean message string for the error value ERROR.
@@ -87,60 +61,20 @@ Custom errors carry their message as the first data element, which
     (if (and data
              (stringp (car data))
              (memq (car-safe error)
-                   '(papis-error papis-http-error papis-server-error)))
+                   '(papis-error)))
         (car data)
       (error-message-string error))))
 
 ;;; Custom variables
 
 (defcustom papis-executable (or (executable-find "papis") "papis")
-  "The Papis executable used to start the server."
+  "The Papis executable used for CLI calls."
   :type 'string
-  :group 'papis)
-
-(defcustom papis-server-host "127.0.0.1"
-  "Host the Papis server listens on."
-  :type 'string
-  :group 'papis)
-
-(defcustom papis-server-port 8888
-  "Port the Papis server listens on.
-
-This is also the port Papis uses by default (`papis serve -p 8888')."
-  :type 'integer
-  :group 'papis)
-
-(defcustom papis-server-auto-start t
-  "Whether API calls may start the Papis server automatically.
-
-When nil, `papis-ensure-server' signals an error instead of running
-`papis serve'.  A server started by another program is always reused."
-  :type 'boolean
-  :group 'papis)
-
-(defcustom papis-server-start-timeout 10
-  "Seconds to wait for `papis serve' to become responsive."
-  :type 'number
-  :group 'papis)
-
-(defcustom papis-request-timeout 10
-  "Seconds to wait for one HTTP request to the Papis server."
-  :type 'number
   :group 'papis)
 
 (defcustom papis-debug nil
-  "Whether to log Papis HTTP requests in the echo area."
+  "Whether to log Papis CLI invocations in the echo area."
   :type 'boolean
-  :group 'papis)
-
-(defcustom papis-server-probe-timeout 0.5
-  "Seconds to wait when checking whether the Papis server is alive."
-  :type 'number
-  :group 'papis)
-
-(defcustom papis-server-log-buffer "*papis-server*"
-  "Buffer receiving the output of the Papis server process."
-  :type 'string
   :group 'papis)
 
 (defcustom papis-default-library nil
@@ -149,18 +83,6 @@ When nil, `papis-ensure-server' signals an error instead of running
 When nil, the value of the PAPIS_LIB environment variable and then
 the first library reported by Papis are used."
   :type '(choice (const :tag "Automatic" nil) string)
-  :group 'papis)
-
-(defcustom papis-fallback-to-cli t
-  "Whether to work around server JSON serialization errors.
-
-Papis 0.16 fails to serialize documents with a date object in their
-metadata.  When this is non-nil, `papis-documents' first tries
-`scripts/papis_dump.py' through `papis exec' (Papis' Python API, with dates
-serialized as strings).  If that is unavailable, it enumerates the
-matching ids with `papis list --id' and reads each document through
-the HTTP API by id."
-  :type 'boolean
   :group 'papis)
 
 (defcustom papis-info-file-name "info.yaml"
@@ -174,10 +96,10 @@ the HTTP API by id."
    (or (and load-file-name (file-name-directory load-file-name))
        (and buffer-file-name (file-name-directory buffer-file-name))
        default-directory))
-  "Python helper used when the Papis server cannot serialize documents.
+  "Python helper that dumps documents as JSON for the CLI backend.
 
 It is run with `papis exec' so that it sees the Python environment
-Papis is installed in.  See `papis-fallback-to-cli'."
+Papis is installed in."
   :type 'string
   :group 'papis)
 
@@ -224,142 +146,7 @@ you."
   :type '(repeat string)
   :group 'papis)
 
-;;; Internal state
-
-(defvar papis--server-process nil
-  "The `papis serve' process started by this Emacs, if any.")
-
-;;; Server
-
-(defun papis-server-url (&optional path)
-  "Return the base URL of the Papis server, with optional PATH appended."
-  (let ((host (if (string-match-p ":" papis-server-host)
-                  (format "[%s]" papis-server-host)
-                papis-server-host)))
-    (concat (format "http://%s:%d" host papis-server-port)
-            (or path ""))))
-
-(defun papis--server-log-tail ()
-  "Return the tail of the server log, prefixed with a newline."
-  (let ((buffer (get-buffer papis-server-log-buffer)))
-    (if (not (buffer-live-p buffer))
-        ""
-      (with-current-buffer buffer
-        (let ((text (string-trim (buffer-string))))
-          (if (string-empty-p text)
-              ""
-            (format "\n%s"
-                    (substring text (max 0 (- (length text) 1000))))))))))
-
-(defun papis-server-running-p ()
-  "Return non-nil when a responsive Papis server is listening."
-  (condition-case nil
-      (let ((data (papis--http-get-json (papis-server-url "/api/library")
-                                        papis-server-probe-timeout)))
-        (and (listp data) t))
-    (error nil)))
-
-(defun papis-start-server ()
-  "Start `papis serve' and wait until it answers requests.
-
-If a server is already listening on `papis-server-port', reuse it.
-Signal `papis-server-error' when the server cannot be started."
-  (interactive)
-  (if (papis-server-running-p)
-      (progn
-        (message "Papis server is already running at %s" (papis-server-url))
-        t)
-    (when (process-live-p papis--server-process)
-      (delete-process papis--server-process)
-      (setq papis--server-process nil))
-    (let* ((program (or (and papis-executable
-                             (file-executable-p papis-executable)
-                             papis-executable)
-                        (executable-find "papis")))
-           (log-buffer (get-buffer-create papis-server-log-buffer))
-           (process nil)
-           (ready nil))
-      (unless program
-        (signal 'papis-server-error
-                (list "Cannot find the `papis' executable; customize `papis-executable'")))
-      (with-current-buffer log-buffer
-        (erase-buffer))
-      (setq process
-            (make-process
-             :name "papis-server"
-             :buffer log-buffer
-             :command (list program
-                            "serve"
-                            "--host" papis-server-host
-                            "-p" (number-to-string papis-server-port))
-             :connection-type 'pipe
-             :noquery t
-             :sentinel (lambda (proc _event)
-                         (unless (process-live-p proc)
-                           (when (eq proc papis--server-process)
-                             (setq papis--server-process nil))))))
-      (setq papis--server-process process)
-      (let ((deadline (+ (float-time) papis-server-start-timeout)))
-        (while (and (not ready)
-                    (< (float-time) deadline)
-                    (process-live-p process))
-          (accept-process-output process 0.1)
-          (setq ready (papis-server-running-p))))
-      (cond
-       (ready
-        (message "Papis server started at %s" (papis-server-url))
-        t)
-       (t
-        (when (process-live-p process)
-          (delete-process process))
-        (setq papis--server-process nil)
-        (signal 'papis-server-error
-                (list (format "Could not start the Papis server at %s%s"
-                              (papis-server-url)
-                              (papis--server-log-tail)))))))))
-
-(defun papis-stop-server ()
-  "Stop the Papis server started by this Emacs."
-  (interactive)
-  (if (process-live-p papis--server-process)
-      (progn
-        (delete-process papis--server-process)
-        (setq papis--server-process nil)
-        (message "Papis server stopped."))
-    (message "No Papis server was started by this Emacs.")))
-
-(defun papis-restart-server ()
-  "Restart the Papis server managed by this Emacs."
-  (interactive)
-  (papis-stop-server)
-  (papis-start-server))
-
-(defun papis-ensure-server ()
-  "Make sure a responsive Papis server is available.
-
-Reuse a server already listening on `papis-server-port'.  Otherwise,
-start one when `papis-server-auto-start' is non-nil."
-  (cond
-   ((papis-server-running-p) t)
-   (papis-server-auto-start (papis-start-server))
-   (t
-    (signal 'papis-server-error
-            (list (format "No Papis server at %s; run `papis-start-server' or set `papis-server-auto-start'"
-                          (papis-server-url)))))))
-
-(defun papis-open-server-log ()
-  "Display the output of the Papis server process."
-  (interactive)
-  (pop-to-buffer (get-buffer-create papis-server-log-buffer)))
-
-(defun papis--kill-emacs ()
-  "Stop the Papis server child process when Emacs exits."
-  (when (process-live-p papis--server-process)
-    (delete-process papis--server-process)))
-
-(add-hook 'kill-emacs-hook #'papis--kill-emacs)
-
-;;; HTTP
+;;; Diagnostics
 
 (defun papis-check ()
   "Display a diagnostic report for the Papis integration."
@@ -374,124 +161,56 @@ start one when `papis-server-auto-start' is non-nil."
                                papis-executable)
                           (executable-find "papis")
                           "not found"))
-              (format "server URL: %s\n" (papis-server-url))
-              (format "server process: %s\n"
-                      (if (process-live-p papis--server-process)
-                          "live"
-                        "not started by this Emacs"))
-              (format "server responding: %s\n" (papis-server-running-p))
-              (format "request timeout: %s\n" papis-request-timeout)
-              (format "proxy services: %S\n" url-proxy-services)
+              (format "dump script: %s\n"
+                      (if (file-exists-p papis-dump-script)
+                          papis-dump-script
+                        (format "%s (missing)" papis-dump-script)))
               "\nLibraries:\n")
       (condition-case err
           (insert (format "%S\n" (papis-libraries)))
         (error
          (insert (format "ERROR: %s\n" (papis-error-message err)))))
-      (insert "\nServer log:\n" (papis--server-log-tail) "\n")
       (special-mode)
       (goto-char (point-min)))
     (display-buffer buffer)))
 
-(defun papis--error-message (body)
-  "Extract a readable error message from the HTTP response BODY."
-  (let ((body (string-trim (or body ""))))
-    (if (string-empty-p body)
-        "empty response"
-      (condition-case nil
-          (let ((data (json-parse-string body
-                                         :object-type 'alist
-                                         :array-type 'list
-                                         :null-object nil
-                                         :false-object nil)))
-            (or (and (listp data)
-                     (alist-get 'message data)
-                     (format "%s" (alist-get 'message data)))
-                body))
-        (error body)))))
-
-(defun papis--http-get-json (url &optional timeout)
-  "GET URL and parse the response as JSON.
-
-TIMEOUT defaults to `papis-request-timeout'.  Signal
-`papis-http-error' for transport, HTTP and JSON errors."
-  (let* ((timeout (or timeout papis-request-timeout))
-         ;; The Papis server is local.  Do not send its requests through an
-         ;; HTTP proxy from the environment: a proxy would make localhost
-         ;; requests hang until they time out.
-         (url-proxy-services nil)
-         (url-request-method "GET")
-         (url-request-extra-headers '(("Accept" . "application/json")))
-         (buffer (condition-case err
-                     (url-retrieve-synchronously url t t timeout)
-                   (error
-                    (signal 'papis-http-error
-                            (list (format "cannot reach %s: %s"
-                                          url (error-message-string err))))))))
-    (unless buffer
-      (signal 'papis-http-error
-              (list (format "request to %s timed out" url))))
-    (when papis-debug
-      (message "Papis: GET %s" url))
-    (unwind-protect
-        (with-current-buffer buffer
-          (goto-char (point-min))
-          (let ((status (bound-and-true-p url-http-response-status))
-                (body nil))
-            (if (search-forward-regexp "\r?\n\r?\n" nil t)
-                (setq body (buffer-substring-no-properties (point) (point-max)))
-              (setq body ""))
-            (setq body (decode-coding-string body 'utf-8))
-            ;; `papis serve' sends the headers of a successful response and
-            ;; only then hits an error while writing the JSON body.  The
-            ;; error is another HTTP response appended to the body.  Pick
-            ;; the inner status and body so the caller sees the real error.
-            (when (string-match "\\`HTTP/[0-9.]+[ \t]+\\([0-9]+\\)" body)
-              (let ((inner-status (string-to-number (match-string 1 body))))
-                (when (string-match "\r?\n\r?\n" body)
-                  (setq status inner-status
-                        body (substring body (match-end 0))))))
-            (cond
-             ((not (and (integerp status) (<= 200 status) (< status 300)))
-              (signal 'papis-http-error
-                      (list (format "%s (HTTP %s)"
-                                    (papis--error-message body)
-                                    (or status "unknown")))))
-             ((string-empty-p (string-trim body)) nil)
-             (t
-              (condition-case err
-                  (json-parse-string body
-                                     :object-type 'alist
-                                     :array-type 'list
-                                     :null-object nil
-                                     :false-object nil)
-                (error
-                 (signal 'papis-http-error
-                         (list (format "invalid JSON from %s: %s"
-                                       url (error-message-string err))))))))))
-      (kill-buffer buffer))))
-
-(defun papis--request (path)
-  "Request PATH from the Papis server and return parsed JSON."
-  (papis-ensure-server)
-  (papis--http-get-json (papis-server-url path)))
-
 ;;; Libraries
+
+(defun papis--library-lines ()
+  "Return the `papis list --libraries' output as non-empty lines."
+  (let ((output (papis--clean-cli-output
+                 (papis--call-cli '("list" "--libraries")))))
+    (seq-filter (lambda (line) (not (string-empty-p line)))
+                (mapcar #'string-trim (split-string output "\n")))))
+
+(defun papis--libraries-via-cli ()
+  "Return the names of all Papis libraries using the CLI."
+  (delq nil
+        (mapcar (lambda (line)
+                  (let ((name (car (split-string line "[ \t]+" t))))
+                    (unless (string-empty-p name) name)))
+                (papis--library-lines))))
+
+(defun papis--library-via-cli (library)
+  "Return a plist with :name and :path for LIBRARY using the CLI."
+  (let* ((line (seq-find (lambda (line)
+                           (string-prefix-p (concat library " ") line))
+                         (papis--library-lines)))
+         (fields (and line (split-string line "[ \t]+" t))))
+    (unless fields
+      (signal 'papis-error
+              (list (format "Unknown Papis library: %s" library))))
+    (list :name (car fields)
+          :path (expand-file-name
+                 (string-trim (substring line (length (car fields))))))))
 
 (defun papis-libraries ()
   "Return the names of all Papis libraries."
-  (let ((data (papis--request "/api/library")))
-    (unless (and (listp data) (cl-every #'stringp data))
-      (signal 'papis-error (list "Unexpected response from /api/library")))
-    data))
+  (papis--libraries-via-cli))
 
 (defun papis-library (library)
   "Return a plist with :name and :path for LIBRARY."
-  (let ((data (papis--request
-               (format "/api/library/%s" (url-hexify-string library)))))
-    (unless (listp data)
-      (signal 'papis-error (list "Unexpected response from /api/library")))
-    (list :name (alist-get 'name data)
-          :path (alist-get 'path data))))
+  (papis--library-via-cli library))
 
 (defvar papis--default-library-cache :unset
   "Cached value of Papis' `default-library' configuration.")
@@ -542,6 +261,12 @@ one of its members."
   data
   library)
 
+(defun papis-document-copy (document)
+  "Return a copy of DOCUMENT with its own metadata."
+  (papis-document--create
+   :data (copy-tree (papis-document-data document))
+   :library (papis-document-library document)))
+
 (defun papis--value-to-string (value)
   "Convert a JSON metadata VALUE to a human-readable string."
   (cond
@@ -552,15 +277,19 @@ one of its members."
    ((numberp value) (number-to-string value))
    (t (format "%s" value))))
 
+(defun papis--document-key-symbol (key)
+  "Return the metadata symbol used for KEY in a document."
+  (cond
+   ((keywordp key) (intern (substring (symbol-name key) 1)))
+   ((stringp key) (intern key))
+   (t key)))
+
 (defun papis-document-get (document key &optional default)
   "Return KEY from DOCUMENT's metadata, or DEFAULT.
 
 KEY may be a string, a symbol or a keyword.  JSON object keys are
 parsed by Emacs as symbols, so strings are interned for lookup."
-  (let* ((key (cond
-               ((keywordp key) (intern (substring (symbol-name key) 1)))
-               ((stringp key) (intern key))
-               (t key)))
+  (let* ((key (papis--document-key-symbol key))
          (cell (assoc key (papis-document-data document))))
     (if cell (cdr cell) default)))
 
@@ -604,6 +333,20 @@ parsed by Emacs as symbols, so strings are interned for lookup."
      ((null year) "")
      ((numberp year) (number-to-string year))
      (t (papis--value-to-string year)))))
+
+(defun papis-document-isbn (document)
+  "Return the first ISBN recorded for DOCUMENT, or nil."
+  (let ((value (papis-document-get document "isbn")))
+    (cond
+     ((null value) nil)
+     ((listp value)
+      (seq-find (lambda (isbn)
+                  (let ((isbn (string-trim (papis--value-to-string isbn))))
+                    (unless (string-empty-p isbn) isbn)))
+                value))
+     (t
+      (let ((isbn (string-trim (papis--value-to-string value))))
+        (unless (string-empty-p isbn) isbn))))))
 
 (defun papis-document-tags (document)
   "Return the tags of DOCUMENT as a list of strings."
@@ -750,21 +493,11 @@ Keys are strings and are sorted according to
 
 ;;; Queries
 
-(defun papis--document-path (library query)
-  "Return the API path for QUERY in LIBRARY.
-
-An empty QUERY requests every document."
-  (let ((base (format "/api/library/%s/document"
-                      (url-hexify-string library))))
-    (if (or (null query) (string-empty-p (string-trim query)))
-        base
-      (concat base "/" (url-hexify-string (string-trim query))))))
-
 (defun papis--parse-documents (data library)
   "Turn parsed JSON DATA into a list of `papis-document' for LIBRARY."
   (unless (cl-every #'listp data)
     (signal 'papis-error
-            (list "Unexpected document response from the Papis server")))
+            (list "Unexpected document response from Papis")))
   (mapcar (lambda (item)
             (papis-document--create :data item :library library))
           data))
@@ -817,29 +550,14 @@ Signal `papis-error' when the process fails."
                                 ""
                               (format "\n%s" errors))))))))
 
-(defun papis--query-ids (library query)
-  "Return the ids matching QUERY in LIBRARY, using `papis list'."
-  (let* ((query (string-trim (or query "")))
-         (arguments (append (list "-l" library "list" "-a" "--id")
-                            (unless (string-empty-p query)
-                              (list query))))
-         (output (papis--call-cli arguments)))
-    (delq nil
-          (mapcar (lambda (line)
-                    (let ((line (string-trim line)))
-                      (and (string-match-p "\\`[0-9a-fA-F-]+\\'" line)
-                           line)))
-                  (split-string output "\n")))))
-
-(defun papis--serialization-error-p (error)
-  "Return non-nil when ERROR is a Papis JSON serialization error."
-  (string-match-p "serializ" (papis-error-message error)))
-
 (defun papis--documents-via-python (library query)
   "Fetch documents matching QUERY in LIBRARY with the Python helper.
 
-This avoids the JSON serialization bug in the HTTP API by running
-`papis-dump-script' through `papis exec'."
+It runs `papis-dump-script' through `papis exec'."
+  (unless (file-exists-p papis-dump-script)
+    (signal 'papis-error
+            (list (format "Papis dump script not found: %s"
+                          papis-dump-script))))
   (let* ((output (papis--call-cli
                   (list "-l" library "exec" papis-dump-script
                         library query)))
@@ -857,53 +575,18 @@ This avoids the JSON serialization bug in the HTTP API by running
                                    :false-object nil)))
       (papis--parse-documents data library))))
 
-(defun papis--documents-via-cli-ids (library query)
-  "Fetch documents matching QUERY in LIBRARY one id at a time.
-
-Used as a workaround when the server cannot serialize the full result
-and the Python helper is unavailable."
-  (let ((ids (papis--query-ids library query)))
-    (when ids
-      (message "Papis: fetching %d document%s by id to work around a server serialization error..."
-               (length ids) (if (= (length ids) 1) "" "s")))
-    (delq nil
-          (mapcar (lambda (id)
-                    (car (papis--parse-documents
-                          (papis--request
-                           (papis--document-path
-                            library (format "papis_id:%s" id)))
-                          library)))
-                  ids))))
-
-(defun papis--fallback-documents (library query)
-  "Return documents for LIBRARY and QUERY through a fallback path."
-  (if (file-exists-p papis-dump-script)
-      (condition-case nil
-          (papis--documents-via-python library query)
-        (error (papis--documents-via-cli-ids library query)))
-    (papis--documents-via-cli-ids library query)))
-
 (defun papis-documents (&optional library query)
   "Return the documents of LIBRARY matching QUERY.
 
 QUERY is a normal Papis query, such as \"author:knuth year:1984\".
 When QUERY is nil or empty, all documents are returned.  LIBRARY
 defaults to `papis-default-library' or the first Papis library."
-  (papis-ensure-server)
   (let* ((library (or library (papis--default-library)))
          (query (or query "")))
     (unless library
       (signal 'papis-error
               (list "No Papis library found; configure one with `papis init' or Papis' config file")))
-    (condition-case err
-        (papis--parse-documents
-         (papis--request (papis--document-path library query))
-         library)
-      (papis-error
-       (if (and papis-fallback-to-cli
-                (papis--serialization-error-p err))
-           (papis--fallback-documents library query)
-         (signal (car err) (cdr err)))))))
+    (papis--documents-via-python library query)))
 
 (defun papis-query (query &optional library)
   "Return the documents of LIBRARY matching QUERY."
@@ -1014,18 +697,25 @@ folder when known, otherwise by its id."
               (list "Cannot change the tags of a document without an id or folder")))
     (append (list "-l" library "tag" "--batch" "--all") selector actions)))
 
+(defun papis--document-set-field (document key value)
+  "Store VALUE for KEY in DOCUMENT's in-memory metadata.
+
+This keeps the document in the frontend in sync with a command
+that changed the metadata on disk; refresh the Papis cache so
+other tools see the new value."
+  (let* ((symbol (papis--document-key-symbol key))
+         (cell (assoc symbol (papis-document-data document))))
+    (if cell
+        (setcdr cell value)
+      (push (cons symbol value) (papis-document-data document)))
+    value))
+
 (defun papis--document-set-tags (document tags)
   "Store TAGS in DOCUMENT's in-memory metadata and return them.
 
 This keeps the document in the frontend in sync with the tag
-command; the Papis server itself may need a restart before it
-returns the new tags."
-  (let ((cell (assoc 'tags (papis-document-data document))))
-    (if cell
-        (setcdr cell tags)
-      (setf (papis-document-data document)
-            (cons (cons 'tags tags) (papis-document-data document))))
-    tags))
+command; refresh the Papis cache so other tools see the new tags."
+  (papis--document-set-field document "tags" tags))
 
 (defun papis--document-tag-change (document action tag)
   "Apply tag ACTION, either \"add\" or \"remove\", for TAG to DOCUMENT."
@@ -1061,6 +751,7 @@ returns the new tags."
                                     (equal candidate tag))
                                   tags))
            (_ tags))))
+      (papis-document-refresh-cache document)
       t)))
 
 (defun papis-document-tag-add (document tag)
@@ -1077,27 +768,179 @@ Signal `papis-error' when Papis reports that the tag is not there.
 Return non-nil on success."
   (papis--document-tag-change document "remove" tag))
 
-(defun papis-document-restart-server ()
-  "Restart the Papis server when this Emacs started it.
+;;; Metadata
 
-`papis serve' keeps its library in memory, so metadata written by
-the `papis' command line is not visible to the API until the
-server restarts.  A server started by another program is left
-alone.  Return non-nil when the server was restarted."
-  (when (process-live-p papis--server-process)
-    (papis-restart-server)
-    t))
+(defun papis-document-field-name (key)
+  "Return KEY as a lowercase Papis metadata field name."
+  (downcase
+   (cond
+    ((keywordp key) (substring (symbol-name key) 1))
+    ((symbolp key) (symbol-name key))
+    (t (format "%s" key)))))
+
+(defun papis--document-update-fields (fields)
+  "Return FIELDS without entries whose value is nil or empty."
+  (seq-filter
+   (lambda (field)
+     (not (string-empty-p
+           (string-trim (papis--value-to-string (cdr field))))))
+   fields))
+
+(defun papis--document-selector-arguments (document)
+  "Return (LIBRARY . ARGUMENTS) that select DOCUMENT for a CLI command.
+
+The document is selected by its folder when known, otherwise by
+its id."
+  (let* ((library (or (papis-document-library document)
+                      (papis--default-library)))
+         (id (papis-document-id document))
+         (folder (papis-document-folder document))
+         (selector (cond
+                    (folder (list "--doc-folder" folder))
+                    (id (list (format "papis_id:%s" id)))
+                    (t nil))))
+    (unless library
+      (signal 'papis-error
+              (list "Cannot determine the library of the document")))
+    (unless selector
+      (signal 'papis-error
+              (list "Cannot update a document without an id or folder")))
+    (cons library selector)))
+
+(defun papis-document-update-arguments (document fields)
+  "Return the `papis update' arguments that set FIELDS on DOCUMENT.
+
+FIELDS is an alist of (KEY . VALUE).  The document is selected by
+its folder when known, otherwise by its id."
+  (let* ((selection (papis--document-selector-arguments document))
+         (settings
+          (seq-mapcat
+           (lambda (field)
+             (list "--set"
+                   (papis-document-field-name (car field))
+                   (papis--value-to-string (cdr field))))
+           fields)))
+    (append (list "-l" (car selection) "update" "--batch" "--all")
+            (cdr selection) settings)))
+
+(defun papis-document-add-file-arguments (document file)
+  "Return the `papis update' arguments that append FILE to DOCUMENT."
+  (let ((selection (papis--document-selector-arguments document)))
+    (append (list "-l" (car selection) "update" "--batch" "--all")
+            (cdr selection)
+            (list "--append" "files" file))))
+
+(defun papis-document-add-file (document file)
+  "Attach FILE to DOCUMENT with `papis update --append files'.
+
+FILE should be relative to the document folder, as Papis stores
+it.  Update DOCUMENT's in-memory file list and return FILE."
+  (let* ((arguments (papis-document-add-file-arguments document file))
+         (result (papis--call-cli-result arguments))
+         (status (plist-get result :status))
+         (output (string-trim
+                  (concat (plist-get result :stdout)
+                          (plist-get result :stderr)))))
+    (when papis-debug
+      (message "Papis: %s %s (exit %s)\n%s"
+               (papis--papis-program)
+               (string-join arguments " ")
+               status output))
+    (unless (zerop status)
+      (signal 'papis-error
+              (list (format "`papis %s' failed (exit %s): %s"
+                            (string-join arguments " ")
+                            status
+                            (if (string-empty-p output)
+                                "no output"
+                              output)))))
+    (papis--document-set-field
+     document "files"
+     (append (papis-document-files document) (list file)))
+    (papis-document-refresh-cache document)
+    file))
+
+(defun papis-document-update (document fields)
+  "Set metadata FIELDS on DOCUMENT with `papis update --set'.
+
+FIELDS is an alist of (KEY . VALUE); entries with a nil or empty
+value are ignored.  Update DOCUMENT's in-memory metadata as well
+and return the fields that were applied.  The Papis cache is
+refreshed so other tools see the new metadata."
+  (let ((fields (papis--document-update-fields fields)))
+    (unless fields
+      (user-error "No metadata fields to update"))
+    (let* ((arguments (papis-document-update-arguments document fields))
+           (result (papis--call-cli-result arguments))
+           (status (plist-get result :status))
+           (output (string-trim
+                    (concat (plist-get result :stdout)
+                            (plist-get result :stderr)))))
+      (when papis-debug
+        (message "Papis: %s %s (exit %s)\n%s"
+                 (papis--papis-program)
+                 (string-join arguments " ")
+                 status output))
+      (unless (zerop status)
+        (signal 'papis-error
+                (list (format "`papis %s' failed (exit %s): %s"
+                              (string-join arguments " ")
+                              status
+                              (if (string-empty-p output)
+                                  "no output"
+                                output)))))
+      (dolist (field fields)
+        (papis--document-set-field document (car field) (cdr field)))
+      (papis-document-refresh-cache document)
+      fields)))
 
 ;;; Book metadata
 
 (defun papis-document-book-files (document)
-  "Return the EPUB and PDF files attached to DOCUMENT."
-  (seq-filter (lambda (file)
-                (string-match-p "\\.\\(?:epub\\|pdf\\)\\'" (downcase file)))
-              (papis-document-files document)))
+  "Return the EPUB and PDF files attached to DOCUMENT as absolute names."
+  (let ((directory (or (papis-document-folder document)
+                       (papis-document-directory document)
+                       default-directory)))
+    (seq-filter
+     (lambda (file)
+       (string-match-p "\\.\\(?:epub\\|pdf\\)\\'" (downcase file)))
+     (mapcar (lambda (file)
+               (if (file-name-absolute-p file)
+                   file
+                 (expand-file-name file directory)))
+             (papis-document-files document)))))
 
-(defun papis-document-book-metadata-command (file)
-  "Return the command list that runs the metadata script on FILE.
+(defun papis-document--existing-book-files (document)
+  "Return EPUB and PDF files of DOCUMENT that exist on disk.
+
+Files recorded in DOCUMENT come first; EPUB/PDF files found in its
+folder are added as well.  The folder scan recovers from a stale
+`files' value in the Papis cache, for example after the book file
+was renamed but the cache was not refreshed."
+  (let* ((folder (papis-document-folder document))
+         (recorded (seq-filter #'file-exists-p
+                               (papis-document-book-files document)))
+         (scanned
+          (when folder
+            (seq-filter
+             (lambda (file)
+               (and (file-regular-p file)
+                    (string-match-p "\\.\\(?:epub\\|pdf\\)\\'"
+                                    (downcase file))))
+             (directory-files folder t)))))
+    (delete-dups (append recorded scanned))))
+
+(defun papis-document-epub-file (document)
+  "Return the EPUB file attached to DOCUMENT, or nil.
+
+When the recorded EPUB no longer exists, fall back to an EPUB found
+in the document folder."
+  (seq-find (lambda (file)
+              (string-match-p "\\.epub\\'" (downcase file)))
+            (papis-document--existing-book-files document)))
+
+(defun papis--book-metadata-script-command (&rest arguments)
+  "Return a command list running the metadata script with ARGUMENTS.
 
 The first element is the program and the rest are its arguments.
 The script is executed directly when it is executable (its shebang
@@ -1108,20 +951,34 @@ runs `uv'), otherwise it is run through `uv run --script'."
               (list (format "Book metadata script not found: %s" script))))
     (cond
      ((file-executable-p script)
-      (list script file))
+      (cons script arguments))
      ((executable-find "uv")
-      (list (executable-find "uv") "run" "--script" script file))
+      (append (list (executable-find "uv") "run" "--script" script)
+              arguments))
      (t
       (signal 'papis-error
               (list (format "Cannot run %s; make it executable or install `uv'"
                             script)))))))
 
+(defun papis-document-book-metadata-command (file)
+  "Return the command list that runs the metadata script on FILE."
+  (papis--book-metadata-script-command file))
+
+(defun papis-document-embed-cover-command (file cover)
+  "Return the command list that embeds COVER into EPUB FILE."
+  (papis--book-metadata-script-command "--embed-cover" cover file))
+
 (defun papis--run-book-metadata-script (file)
   "Run the book metadata script on FILE and return its output.
 
 Signal `papis-error' when the script exits unsuccessfully."
-  (let* ((command (papis-document-book-metadata-command file))
-         (stderr-file (make-temp-file "papis-book-metadata-stderr-"))
+  (papis--run-metadata-command (papis-document-book-metadata-command file)))
+
+(defun papis--run-metadata-command (command)
+  "Run metadata script COMMAND and return its combined output.
+
+Signal `papis-error' when the script exits unsuccessfully."
+  (let* ((stderr-file (make-temp-file "papis-book-metadata-stderr-"))
          status stdout stderr)
     (unwind-protect
         (with-temp-buffer
@@ -1150,9 +1007,9 @@ Signal `papis-error' when the script exits unsuccessfully."
   "Reload DOCUMENT's metadata in the Papis cache.
 
 Changes made to `info.yaml' by an external program are not visible
-to the server until the cache is updated.  Rebuild only DOCUMENT's
-entry when its folder is known, otherwise update all newer entries
-in the library."
+to Papis until the cache is updated.  Rebuild only DOCUMENT's entry
+when its folder is known, otherwise update all newer entries in the
+library."
   (let* ((library (or (papis-document-library document)
                       (papis--default-library)))
          (folder (papis-document-folder document)))
@@ -1189,9 +1046,9 @@ first EPUB or PDF attached to DOCUMENT.  The script merges the
 file's metadata with `info.yaml', writes both files back and
 renames the file to \"author - title (year).epub\" (or `.pdf').
 PDF metadata is written with ExifTool.  Refresh the Papis cache
-afterwards so the server returns the new metadata.  Return the
-script output."
-  (let ((file (or file (car (papis-document-book-files document)))))
+afterwards so Papis returns the new metadata.  Return the script
+output."
+  (let ((file (or file (car (papis-document--existing-book-files document)))))
     (unless file
       (user-error "Document \"%s\" has no EPUB or PDF file"
                   (papis-document-title document)))
@@ -1204,15 +1061,67 @@ script output."
       (papis-document-refresh-cache document)
       output)))
 
+(defun papis-document-embed-cover (document cover)
+  "Embed the image COVER into DOCUMENT's EPUB file.
+
+Return the script output.  Signal `user-error' when DOCUMENT has no
+EPUB file and `papis-error' when the script fails."
+  (let ((file (papis-document-epub-file document)))
+    (unless file
+      (user-error "Document \"%s\" has no EPUB file"
+                  (papis-document-title document)))
+    (unless (file-exists-p file)
+      (signal 'papis-error (list (format "Book file not found: %s" file))))
+    (papis--run-metadata-command
+     (papis-document-embed-cover-command file cover))))
+
 (defun papis-document-sync-metadata (document)
   "Sync DOCUMENT's metadata after `info.yaml' was edited.
 
 When DOCUMENT has an EPUB or PDF file, run the book metadata script
 so the file is updated and renamed.  Otherwise only refresh the
 Papis cache."
-  (if (papis-document-book-files document)
+  (if (papis-document--existing-book-files document)
       (papis-document-update-book-metadata document)
     (papis-document-refresh-cache document)))
+
+(defun papis-read-document (&optional prompt)
+  "Prompt for a library and one of its documents and return it.
+PROMPT is used as the library prompt."
+  (let* ((library (completing-read (or prompt "Library: ")
+                                   (papis-libraries) nil t))
+         (documents (papis-documents library ""))
+         (choices (mapcar (lambda (document)
+                            (let ((author (papis-document-author document))
+                                  (year (papis-document-year-string document)))
+                              (cons (format "%s%s"
+                                            (papis-document-title document)
+                                            (cond
+                                             ((not (string-empty-p author))
+                                              (format " — %s" author))
+                                             ((not (string-empty-p year))
+                                              (format " (%s)" year))
+                                             (t "")))
+                                    document)))
+                          documents)))
+    (unless choices
+      (user-error "No documents in library \"%s\"" library))
+    (cdr (assoc (completing-read "Document: " choices nil t) choices))))
+
+(defun papis-update-book-metadata (&optional document)
+  "Update DOCUMENT's EPUB or PDF metadata with the metadata script.
+
+Interactively, prompt for a library and a document.  The script
+merges `info.yaml' with the file's metadata, writes both back and
+renames the file, then refreshes the Papis cache.  Return the script
+output."
+  (interactive)
+  (let* ((document (or document (papis-read-document)))
+         (output (papis-document-update-book-metadata document)))
+    (when (and (called-interactively-p 'interactive)
+               (not (string-empty-p (string-trim output))))
+      (message "%s" (string-trim output)))
+    output))
 
 ;;; Export
 
@@ -1221,15 +1130,12 @@ Papis cache."
 
 FORMAT is a Papis exporter name, such as \"bibtex\" or \"yaml\".
 Return the exported string."
-  (let* ((query (string-trim (or query "")))
-         (path (if (string-empty-p query)
-                   ;; The API route needs a non-empty query segment, so use
-                   ;; an encoded space, which Papis treats as an empty query.
-                   (format "/api/library/%s/document/%%20"
-                           (url-hexify-string library))
-                 (papis--document-path library query))))
-    (papis--request
-     (format "%s/format/%s" path (url-hexify-string format)))))
+  (let ((query (string-trim (or query ""))))
+    (papis--clean-cli-output
+     (papis--call-cli
+      (append (list "-l" library "export" "--batch" "--all"
+                    "-f" format)
+              (unless (string-empty-p query) (list query)))))))
 
 (defun papis--clean-cli-output (text)
   "Remove Papis warnings and log lines from CLI output TEXT."
@@ -1262,23 +1168,8 @@ Return the exported string."
               selector)))))
 
 (defun papis-document-export (document format)
-  "Export DOCUMENT using Papis exporter FORMAT.
-
-Try the server API first.  Papis 0.16 has a broken format endpoint
-\(plugin loading returns an empty string), so fall back to
-`papis export' when the API returns nothing."
-  (let* ((library (or (papis-document-library document)
-                      (papis--default-library)))
-         (id (papis-document-id document))
-         (query (and id (format "papis_id:%s" id)))
-         (result (when query
-                   (condition-case nil
-                       (papis-document-format library query format)
-                     (error nil)))))
-    (if (and (stringp result)
-             (not (string-empty-p (string-trim result))))
-        result
-      (papis--export-via-cli document format))))
+  "Export DOCUMENT using Papis exporter FORMAT."
+  (papis--export-via-cli document format))
 
 ;;; Opening documents
 
