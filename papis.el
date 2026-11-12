@@ -103,6 +103,32 @@ Papis is installed in."
   :type 'string
   :group 'papis)
 
+(defcustom papis-author-script
+  (expand-file-name
+   "scripts/papis_author.py"
+   (or (and load-file-name (file-name-directory load-file-name))
+       (and buffer-file-name (file-name-directory buffer-file-name))
+       default-directory))
+  "Python helper that regenerates `author' from `author_list'.
+
+It is run with `papis exec' and writes only `info.yaml', so it does
+not rename the attached files."
+  :type 'string
+  :group 'papis)
+
+(defcustom papis-attach-script
+  (expand-file-name
+   "scripts/papis_add_file.py"
+   (or (and load-file-name (file-name-directory load-file-name))
+       (and buffer-file-name (file-name-directory buffer-file-name))
+       default-directory))
+  "Python helper that appends a file to a document's `files' metadata.
+
+It is run with `papis exec' and writes only `info.yaml', so it does
+not rename existing files."
+  :type 'string
+  :group 'papis)
+
 (defcustom papis-book-metadata-script
   (expand-file-name
    "scripts/papis_book_metadata.py"
@@ -134,6 +160,11 @@ an external program."
     "eprint" "tags" "abstract" "note" "notes" "time-added")
   "Preferred order of document fields when displaying metadata."
   :type '(repeat string)
+  :group 'papis)
+
+(defcustom papis-paper-search-limit 10
+  "Number of paper search results offered for metadata lookup."
+  :type 'integer
   :group 'papis)
 
 (defcustom papis-tags '("reading" "read")
@@ -880,6 +911,53 @@ it.  Update DOCUMENT's in-memory file list and return FILE."
     (papis-document-refresh-cache document)
     file))
 
+(defun papis-document-attach-file (document file)
+  "Append FILE to DOCUMENT's metadata without renaming other files.
+
+FILE is stored relative to the document folder.  Return FILE."
+  (let* ((library (or (papis-document-library document)
+                      (papis--default-library)))
+         (folder (papis-document-folder document))
+         (files (papis-document-files document)))
+    (unless library
+      (signal 'papis-error
+              (list "Cannot determine the library of the document")))
+    (unless folder
+      (user-error "Cannot determine the folder of \"%s\""
+                  (papis-document-title document)))
+    (unless (file-exists-p papis-attach-script)
+      (signal 'papis-error
+              (list (format "Attach script not found: %s"
+                            papis-attach-script))))
+    (let* ((arguments (list "-l" library "exec" papis-attach-script
+                            folder file))
+           (result (papis--call-cli-result arguments))
+           (status (plist-get result :status))
+           (output (string-trim
+                    (concat (plist-get result :stdout)
+                            (plist-get result :stderr)))))
+      (when papis-debug
+        (message "Papis: %s %s (exit %s)\n%s"
+                 (papis--papis-program)
+                 (string-join arguments " ")
+                 status output))
+      (unless (zerop status)
+        (signal 'papis-error
+                (list (format "`papis %s' failed (exit %s): %s"
+                              (string-join arguments " ")
+                              status
+                              (if (string-empty-p output)
+                                  "no output"
+                                output)))))
+      (papis--document-set-field
+       document "files"
+       (append (seq-remove (lambda (existing)
+                             (equal (file-name-nondirectory existing) file))
+                           files)
+               (list file))))
+    (papis-document-refresh-cache document)
+    file))
+
 (defun papis-document-update (document fields)
   "Set metadata FIELDS on DOCUMENT with `papis update --set'.
 
@@ -917,18 +995,29 @@ refreshed so other tools see the new metadata."
 (defun papis-document-reset-author (document)
   "Regenerate DOCUMENT's AUTHOR string from its AUTHOR-LIST.
 
-Run `papis update --reset author', refresh the cache, and read the
-generated author back into the in-memory document when possible."
-  (let* ((selection (papis--document-selector-arguments document))
-         (arguments (append (list "-l" (car selection) "update"
-                                  "--batch" "--all")
-                            (cdr selection)
-                            (list "--reset" "author")))
-         (result (papis--call-cli-result arguments))
-         (status (plist-get result :status))
-         (output (string-trim
-                  (concat (plist-get result :stdout)
-                          (plist-get result :stderr)))))
+Run `scripts/papis_author.py' through `papis exec' so only
+`info.yaml' is written and attached files keep their names, then
+refresh the cache and read the generated author back."
+  (let* ((library (or (papis-document-library document)
+                      (papis--default-library)))
+         (folder (papis-document-folder document)))
+    (unless library
+      (signal 'papis-error
+              (list "Cannot determine the library of the document")))
+    (unless folder
+      (user-error "Cannot determine the folder of \"%s\""
+                  (papis-document-title document)))
+    (unless (file-exists-p papis-author-script)
+      (signal 'papis-error
+              (list (format "Author script not found: %s"
+                            papis-author-script))))
+    (papis-document-refresh-cache document)
+    (let* ((arguments (list "-l" library "exec" papis-author-script folder))
+           (result (papis--call-cli-result arguments))
+           (status (plist-get result :status))
+           (output (string-trim
+                    (concat (plist-get result :stdout)
+                            (plist-get result :stderr)))))
     (when papis-debug
       (message "Papis: %s %s (exit %s)\n%s"
                (papis--papis-program)
@@ -943,16 +1032,28 @@ generated author back into the in-memory document when possible."
                                 "no output"
                               output)))))
     (papis-document-refresh-cache document)
-    (when-let* ((folder (papis-document-folder document)))
-      (let ((author (string-trim
-                     (papis--clean-cli-output
-                      (papis--call-cli
-                       (list "-l" (car selection) "list"
-                             "--format" "{doc[author]}"
-                             "--doc-folder" folder))))))
-        (unless (string-empty-p author)
-          (papis--document-set-field document "author" author))))
-    t))
+    (let ((author (string-trim
+                   (papis--clean-cli-output
+                    (papis--call-cli
+                     (list "-l" library "list"
+                           "--format" "{doc[author]}"
+                           "--doc-folder" folder))))))
+      (unless (string-empty-p author)
+        (papis--document-set-field document "author" author)))
+    t)))
+
+(defun papis-update-author (&optional document)
+  "Regenerate DOCUMENT's AUTHOR from its AUTHOR-LIST.
+
+Interactively, prompt for a library and document.  This is useful
+after editing `author_list' manually in `info.yaml'."
+  (interactive)
+  (let ((document (or document (papis-read-document))))
+    (papis-document-reset-author document)
+    (when (called-interactively-p 'interactive)
+      (message "Updated author for \"%s\""
+               (papis-document-title document)))
+    document))
 
 ;;; Book metadata
 
@@ -1183,6 +1284,367 @@ output."
                (not (string-empty-p (string-trim output))))
       (message "%s" (string-trim output)))
     output))
+
+;;; Adding books
+
+(defun papis-author-name-entry (name)
+  "Return a structured AUTHOR-LIST entry for NAME.
+
+Names written as \"Family, Given\" keep that split; otherwise the
+last word is treated as the family name."
+  (let ((name (string-trim (or name ""))))
+    (cond
+     ((string-empty-p name) nil)
+     ((string-match "\\`\\([^,]+\\),\\s-*\\(.+\\)\\'" name)
+      (list (cons "family" (string-trim (match-string 1 name)))
+            (cons "given" (string-trim (match-string 2 name)))))
+     ((string-match "\\`\\(.+\\)\\s-+\\([^ \t]+\\)\\'" name)
+      (list (cons "family" (match-string 2 name))
+            (cons "given" (string-trim (match-string 1 name)))))
+     (t
+      (list (cons "family" name) (cons "given" ""))))))
+
+(defun papis-author-list-from-string (authors)
+  "Return structured author entries parsed from AUTHORS.
+AUTHORS uses `;` or ` and ` between names."
+  (delq nil
+        (mapcar #'papis-author-name-entry
+                (split-string (string-trim (or authors ""))
+                              "\\s-*;\\s-*\\|\\s-+and\\s-+"
+                              t))))
+
+(defun papis--book-name-defaults (file)
+  "Return (:author :title :year) parsed from FILE's base name.
+The expected shape is \"Author - Title (Year).ext\"."
+  (let* ((base (file-name-base file))
+         (year (and (string-match "(\\([0-9]\\{4\\}\\))\\'" base)
+                    (match-string 1 base)))
+         (stem (string-trim
+                (if year
+                    (replace-regexp-in-string
+                     "\\s-*([0-9]\\{4\\})\\'" "" base)
+                  base)))
+         (separator (string-match " - " stem)))
+    (if separator
+        (list :author (string-trim (substring stem 0 separator))
+              :title (string-trim (substring stem (+ separator 3)))
+              :year year)
+      (list :author "" :title stem :year year))))
+
+(defun papis-add-book-arguments (library file title)
+  "Return the `papis add' arguments for FILE in LIBRARY with TITLE."
+  (list "-l" library "add" "--batch" "--no-confirm"
+        "--set" "title" title file))
+
+(defun papis--added-document-folder (output)
+  "Return the document folder reported by `papis add' OUTPUT."
+  (when (string-match "Document folder is '\\([^']+\\)'" output)
+    (match-string 1 output)))
+
+(defun papis--add-book-file (library file title author year)
+  "Add FILE with TITLE, AUTHOR and YEAR to LIBRARY.
+
+Return the new document folder.  AUTHOR is parsed into a structured
+`author_list', and Papis regenerates the `author' string."
+  (unless (file-regular-p file)
+    (user-error "Book file not found: %s" file))
+  (when (string-empty-p title)
+    (user-error "A book needs a title"))
+  (let* ((authors (papis-author-list-from-string author))
+         (arguments (papis-add-book-arguments library file title))
+         (result (papis--call-cli-result arguments))
+         (status (plist-get result :status))
+         (output (string-trim
+                  (concat (plist-get result :stdout)
+                          (plist-get result :stderr)))))
+    (when papis-debug
+      (message "Papis: %s %s (exit %s)\n%s"
+               (papis--papis-program)
+               (string-join arguments " ")
+               status output))
+    (unless (zerop status)
+      (signal 'papis-error
+              (list (format "`papis %s' failed (exit %s): %s"
+                            (string-join arguments " ")
+                            status
+                            (if (string-empty-p output)
+                                "no output"
+                              output)))))
+    (let ((folder (papis--added-document-folder output)))
+      (unless folder
+        (signal 'papis-error
+                (list (format "`papis add' did not report a document folder: %s"
+                              output))))
+      (let ((document (papis-document--create
+                       :library library
+                       :data (list (cons '_papis_local_folder folder)))))
+        (papis-document-update
+         document
+         (delq nil
+               (list (cons "title" title)
+                     (unless (string-empty-p year) (cons "year" year))
+                     (when authors (cons "author_list" authors))))))
+      folder)))
+
+(defun papis-add-book (&optional file library)
+  "Add a book FILE to LIBRARY and return its document folder.
+
+Interactively, prompt for the file, library, title, author and year.
+Defaults are parsed from a file name shaped like
+\"Author - Title (Year).ext\".  The document is added with
+`papis add', then its title, year and structured author_list are
+written with `papis update', which also regenerates the author."
+  (interactive)
+  (let* ((file (expand-file-name
+                (or file (read-file-name "Book file: " nil nil t))))
+         (defaults (papis--book-name-defaults file))
+         (library
+          (or library
+              (let ((libraries (papis-libraries)))
+                (completing-read
+                 "Library: " libraries nil t nil nil
+                 (papis-default-library-name libraries)))))
+         (title (string-trim
+                 (read-string "Title: " (plist-get defaults :title))))
+         (author (string-trim
+                  (read-string "Author: " (plist-get defaults :author))))
+         (year (string-trim
+                (read-string "Year: " (or (plist-get defaults :year) ""))))
+         (folder (papis--add-book-file library file title author year)))
+    (when (called-interactively-p 'interactive)
+      (message "Added \"%s\" to %s" title library))
+    folder))
+
+;;; Paper metadata
+
+(defun papis--paper-search-arguments (library source query limit output)
+  "Return the `papis explore' arguments for a paper search."
+  (list "-l" library "explore" source "-q" query
+        "-m" (number-to-string limit)
+        "export" "--format" "json" "--out" output))
+
+(defun papis--paper-call (arguments)
+  "Run ARGUMENTS and return their combined output, or signal an error."
+  (let* ((result (papis--call-cli-result arguments))
+         (status (plist-get result :status))
+         (output (string-trim
+                  (concat (plist-get result :stdout)
+                          (plist-get result :stderr)))))
+    (when papis-debug
+      (message "Papis: %s %s (exit %s)\n%s"
+               (papis--papis-program)
+               (string-join arguments " ")
+               status output))
+    (unless (zerop status)
+      (signal 'papis-error
+              (list (format "`papis %s' failed (exit %s): %s"
+                            (string-join arguments " ")
+                            status
+                            (if (string-empty-p output)
+                                "no output"
+                              output)))))
+    output))
+
+(defun papis--paper-json-documents (file)
+  "Return the paper records stored as JSON in FILE."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (json-parse-string (buffer-string)
+                       :object-type 'hash-table
+                       :array-type 'list
+                       :null-object nil
+                       :false-object nil)))
+
+(defun papis--paper-value (document key)
+  "Return DOCUMENT's KEY as a string, or nil."
+  (let ((value (gethash key document)))
+    (and value (papis--value-to-string value))))
+
+(defun papis--paper-label (document index)
+  "Return a completion label for paper DOCUMENT at zero-based INDEX."
+  (format "%d. %s — %s%s"
+          (1+ index)
+          (or (papis--paper-value document "title") "Untitled")
+          (or (papis--paper-value document "author") "Unknown author")
+          (let ((year (papis--paper-value document "year")))
+            (if year (format " (%s)" year) ""))))
+
+(defun papis--paper-search-documents (library source query)
+  "Search SOURCE for QUERY in LIBRARY and return the paper records."
+  (let ((output (make-temp-file "papis-paper-search-" nil ".json")))
+    (unwind-protect
+        (progn
+          (papis--paper-call
+           (papis--paper-search-arguments
+            library source query papis-paper-search-limit output))
+          (papis--paper-json-documents output))
+      (delete-file output))))
+
+(defun papis--paper-choose (documents)
+  "Prompt for one of DOCUMENTS and return it."
+  (let* ((choices (seq-map-indexed
+                   (lambda (document index)
+                     (cons (papis--paper-label document index) document))
+                   documents))
+         (label (completing-read "Paper: " choices nil t)))
+    (cdr (assoc label choices))))
+
+(defun papis--paper-author-list (document)
+  "Return structured author entries from paper DOCUMENT."
+  (let ((authors (gethash "author_list" document)))
+    (cond
+     ((and (listp authors) authors)
+      (delq nil
+            (mapcar
+             (lambda (author)
+               (when (hash-table-p author)
+                 (let ((family (papis--paper-value author "family"))
+                       (given (papis--paper-value author "given")))
+                   (when (or family given)
+                     (list (cons "family" (or family ""))
+                           (cons "given" (or given "")))))))
+             authors)))
+     (t
+      (papis-author-list-from-string
+       (papis--paper-value document "author"))))))
+
+(defun papis--paper-field (key value)
+  "Return (KEY . VALUE) when VALUE is non-empty, or nil."
+  (cond
+   ((null value) nil)
+   ((equal key "author_list") (cons key value))
+   ((string-empty-p (string-trim value)) nil)
+   (t (cons key value))))
+
+(defun papis--paper-metadata (document)
+  "Return Papis metadata fields for paper DOCUMENT."
+  (let ((title (papis--paper-value document "title"))
+        (authors (papis--paper-author-list document))
+        (year (papis--paper-value document "year"))
+        (doi (papis--paper-value document "doi"))
+        (url (papis--paper-value document "url"))
+        (abstract (papis--paper-value document "abstract"))
+        (publisher (papis--paper-value document "publisher"))
+        (type (papis--paper-value document "type"))
+        (journal (papis--paper-value document "journal"))
+        (booktitle (papis--paper-value document "booktitle"))
+        (volume (papis--paper-value document "volume"))
+        (pages (papis--paper-value document "pages")))
+    (delq nil
+          (list (papis--paper-field "title" title)
+                (papis--paper-field "author_list" authors)
+                (papis--paper-field "year" year)
+                (papis--paper-field "doi" doi)
+                (papis--paper-field "url" url)
+                (papis--paper-field "abstract" abstract)
+                (papis--paper-field "publisher" publisher)
+                (papis--paper-field "type" type)
+                (papis--paper-field "journal" journal)
+                (papis--paper-field "booktitle" booktitle)
+                (papis--paper-field "volume" volume)
+                (papis--paper-field "pages" pages)))))
+
+(defun papis--paper-import-metadata (source identifier)
+  "Return metadata fields imported by SOURCE for IDENTIFIER."
+  (let ((directory (make-temp-file "papis-paper-import-" t)))
+    (unwind-protect
+        (progn
+          (papis--paper-call
+           (list "-l" directory "add" "--batch" "--no-confirm"
+                 "--from" source identifier))
+          (let* ((result (papis--call-cli-result
+                          (list "-l" directory "export" "-a" "-f" "json")))
+                 (status (plist-get result :status))
+                 (stdout (string-trim (plist-get result :stdout)))
+                 (stderr (string-trim (plist-get result :stderr))))
+            (unless (zerop status)
+              (signal 'papis-error
+                      (list (format "`papis export' failed (exit %s): %s"
+                                    status
+                                    (if (string-empty-p stderr)
+                                        stdout
+                                      stderr)))))
+            (when (and (not (string-empty-p stdout))
+                       (not (string= stdout "[]")))
+              (let ((documents
+                     (json-parse-string stdout
+                                        :object-type 'hash-table
+                                        :array-type 'list
+                                        :null-object nil
+                                        :false-object nil)))
+                (when documents
+                  (papis--paper-metadata (car documents)))))))
+      (delete-directory directory t))))
+
+(defun papis--pdf-page-defaults (file)
+  "Return (:title :author) from the first page of PDF FILE."
+  (when (and (executable-find "pdftotext")
+             (file-regular-p file))
+    (with-temp-buffer
+      (when (zerop (call-process "pdftotext" nil t nil
+                                 "-f" "1" "-l" "1" file "-"))
+        (let ((lines (seq-filter
+                      (lambda (line) (not (string-empty-p line)))
+                      (mapcar #'string-trim
+                              (split-string (buffer-string) "\n")))))
+          (list :title (or (nth 0 lines) "")
+                :author (or (nth 1 lines) "")))))))
+
+(defun papis--paper-pdf-metadata (document)
+  "Return metadata fields extracted from DOCUMENT's PDF file."
+  (let* ((file (seq-find (lambda (candidate)
+                           (string-match-p "\\.pdf\\'" (downcase candidate)))
+                         (papis-document-book-files document)))
+         (defaults (and file (papis--book-name-defaults file)))
+         (page (and file (papis--pdf-page-defaults file)))
+         (title (or (plist-get page :title)
+                    (plist-get defaults :title)))
+         (author (or (plist-get page :author)
+                     (plist-get defaults :author)))
+         (year (or (plist-get defaults :year)
+                   (papis-document-year-string document))))
+    (unless file
+      (user-error "Document \"%s\" has no PDF file"
+                  (papis-document-title document)))
+    (let ((title (string-trim (read-string "Title: " title)))
+          (author (string-trim (read-string "Author: " author)))
+          (year (string-trim (read-string "Year: " year))))
+      (delq nil
+            (list (cons "title" title)
+                  (cons "author_list"
+                        (papis-author-list-from-string author))
+                  (cons "type" "article")
+                  (unless (string-empty-p year) (cons "year" year)))))))
+
+(defun papis-paper-metadata-for-document (document source)
+  "Return paper metadata fields for DOCUMENT from SOURCE.
+
+SOURCE is `crossref', `arxiv', `dblp', `doi', `pubmed' or `pdf'."
+  (cond
+   ((member source '("crossref" "arxiv" "dblp"))
+    (let* ((library (or (papis-document-library document)
+                        (papis--default-library)))
+           (default-query
+            (string-trim
+             (concat (papis-document-title document) " "
+                     (papis-document-author document))))
+           (query (string-trim (read-string "Query: " default-query)))
+           (documents (papis--paper-search-documents
+                       library source query)))
+      (unless documents
+        (user-error "No papers found for \"%s\"" query))
+      (papis--paper-metadata (papis--paper-choose documents))))
+   ((member source '("doi" "pubmed"))
+    (let* ((prompt (if (equal source "doi") "DOI: " "PMID: "))
+           (identifier (string-trim (read-string prompt)))
+           (fields (papis--paper-import-metadata source identifier)))
+      (unless fields
+        (user-error "No metadata found for %s" identifier))
+      fields))
+   ((equal source "pdf")
+    (papis--paper-pdf-metadata document))
+   (t
+    (user-error "Unknown metadata source: %s" source))))
 
 ;;; Export
 

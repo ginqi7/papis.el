@@ -62,7 +62,91 @@
           (expect (papis-etaf--document-file-name document)
                   :to-equal "A Book (2020).epub"))))
 
+    (describe "tags"
+      (it "offers preset tags and tags already in the library"
+        (let ((first (papis-etaf-test--document
+                      '((title . "A") (tags . ("lisp")))))
+              (second (papis-etaf-test--document
+                       '((title . "B") (tags . ("emacs" "reading"))))))
+          (expect (papis-etaf--tag-candidates (list first second))
+                  :to-have-same-items-as
+                  '("reading" "read" "lisp" "emacs")))))
+
     (describe "generated covers"
+      (it "builds typographic covers for papers"
+        (let* ((document
+                (papis-etaf-test--document
+                 '((title . "MapReduce: Simplified Data Processing")
+                   (author . "Dean, Jeffrey and Ghemawat, Sanjay")
+                   (year . 2004)
+                   (type . "inproceedings")
+                   (booktitle . "OSDI")
+                   (doi . "10.5555/1251254"))))
+               (svg (papis-etaf--paper-cover-svg document)))
+          (expect (papis-etaf--paper-p document) :to-be-truthy)
+          (expect (string-match-p "PAPER" svg) :to-be-truthy)
+          (expect (string-match-p "MapReduce" svg) :to-be-truthy)
+          (expect (string-match-p "OSDI" svg) :to-be-truthy)
+          (expect (string-match-p "10.5555/1251254" svg) :to-be-truthy)))
+
+      (it "uses the most recently attached cover"
+        (let* ((folder (make-temp-file "papis-cover-" t))
+               (jpg (expand-file-name "cover.jpg" folder))
+               (svg (expand-file-name "cover.svg" folder))
+               (first (papis-etaf-test--document
+                       (list (cons 'title "A Book")
+                             (cons 'files (list "cover.jpg" "cover.svg"))
+                             (cons '_papis_local_folder folder))))
+               (second (papis-etaf-test--document
+                        (list (cons 'title "A Book")
+                              (cons 'files (list "cover.svg" "cover.jpg"))
+                              (cons '_papis_local_folder folder)))))
+          (unwind-protect
+              (progn
+                (write-region "" nil jpg)
+                (write-region "" nil svg)
+                (expect (papis-etaf--cover-source first) :to-equal svg)
+                (expect (papis-etaf--cover-source second) :to-equal jpg))
+            (delete-directory folder t))))
+
+      (it "prefers the document folder for cover files"
+        (let* ((folder (make-temp-file "papis-cover-" t))
+               (document (papis-etaf-test--document
+                          (list (cons 'title "A Book")
+                                (cons '_papis_local_folder folder)))))
+          (unwind-protect
+              (expect (papis-etaf--cover-destination document "jpg" "key")
+                      :to-equal (expand-file-name "cover.jpg" folder))
+            (delete-directory folder t))))
+
+      (it "saves generated covers beside the document and attaches them"
+        (let* ((folder (make-temp-file "papis-cover-" t))
+               (document (papis-etaf-test--document
+                          `((title . "A Book")
+                            (_papis_local_folder . ,folder))))
+               (attached nil))
+          (unwind-protect
+              (progn
+                (cl-letf (((symbol-function 'papis-document-attach-file)
+                           (lambda (_document file)
+                             (setq attached file))))
+                  (let ((cover
+                         (papis-etaf--write-generated-cover
+                          document
+                          (papis-etaf--paper-cover-svg document))))
+                    (expect cover
+                            :to-equal (expand-file-name "cover.svg" folder))
+                    (expect (file-exists-p cover) :to-be-truthy)
+                    (expect (papis-etaf--generated-cover-p cover)
+                            :to-be-truthy)
+                    (expect attached :to-equal "cover.svg"))))
+            (delete-directory folder t))))
+
+      (it "does not classify books as papers"
+        (let ((document
+               (papis-etaf-test--document
+                '((title . "A Book") (type . "book")))))
+          (expect (papis-etaf--paper-p document) :to-be nil)))
       (it "escapes metadata in the SVG"
         (let* ((document
                 (papis-etaf-test--document

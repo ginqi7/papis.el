@@ -355,9 +355,8 @@
                   ((symbol-function 'papis--clean-cli-output) #'identity))
           (expect (papis-document-reset-author document) :to-be-truthy)
           (expect arguments
-                  :to-equal '("-l" "books" "update" "--batch" "--all"
-                              "--doc-folder" "/tmp/books/a-title/"
-                              "--reset" "author"))
+                  :to-equal (list "-l" "books" "exec" papis-author-script
+                                  "/tmp/books/a-title/"))
           (expect (papis-document-author document) :to-equal "Writer, A.")
           (expect refreshed :to-be document))))
 
@@ -402,6 +401,143 @@
         (papis--document-set-field copy "title" "New Title")
         (expect (papis-document-title original) :to-equal "Old Title")
         (expect (papis-document-title copy) :to-equal "New Title"))))
+
+  (describe "adding books"
+    (it "parses author lists"
+      (expect (papis-author-list-from-string "Alex Xu and Sahn Lam")
+              :to-equal
+              '((("family" . "Xu") ("given" . "Alex"))
+                (("family" . "Lam") ("given" . "Sahn"))))
+      (expect (papis-author-list-from-string
+               "Kleppmann, Martin; Chris Riccomini;")
+              :to-equal
+              '((("family" . "Kleppmann") ("given" . "Martin"))
+                (("family" . "Riccomini") ("given" . "Chris")))))
+
+    (it "parses defaults from a book file name"
+      (expect (papis--book-name-defaults
+               "/tmp/Alex Xu - System Design Interview (2020).epub")
+              :to-equal '(:author "Alex Xu"
+                          :title "System Design Interview"
+                          :year "2020"))
+      (expect (papis--book-name-defaults
+               "/tmp/Derek Sivers - Derek Sivers Blog.epub")
+              :to-equal '(:author "Derek Sivers"
+                          :title "Derek Sivers Blog"
+                          :year nil)))
+
+    (it "builds `papis add' arguments"
+      (expect (papis-add-book-arguments "books" "/tmp/book.epub" "A Title")
+              :to-equal '("-l" "books" "add" "--batch" "--no-confirm"
+                          "--set" "title" "A Title" "/tmp/book.epub")))
+
+    (it "adds a book and writes structured metadata"
+      (let* ((folder (make-temp-file "papis-add-book-" t))
+             (file (expand-file-name "Alex Xu - Test Book (2020).epub"
+                                     folder))
+             (arguments nil)
+             (document nil)
+             (fields nil))
+        (unwind-protect
+            (progn
+              (write-region "" nil file)
+              (cl-letf (((symbol-function 'read-string)
+                         (lambda (_prompt &optional initial)
+                           (or initial "")))
+                        ((symbol-function 'papis--call-cli-result)
+                         (lambda (args)
+                           (setq arguments args)
+                           (list :status 0 :stdout ""
+                                 :stderr "Document folder is '/tmp/new-book'.")))
+                        ((symbol-function 'papis-document-update)
+                         (lambda (doc update-fields)
+                           (setq document doc)
+                           (setq fields update-fields))))
+                (expect (papis-add-book file "books")
+                        :to-equal "/tmp/new-book")
+                (expect arguments
+                        :to-equal (papis-add-book-arguments
+                                   "books" file "Test Book"))
+                (expect (papis-document-get document "_papis_local_folder")
+                        :to-equal "/tmp/new-book")
+                (expect fields
+                        :to-equal
+                        '(("title" . "Test Book")
+                          ("year" . "2020")
+                          ("author_list"
+                           (("family" . "Xu") ("given" . "Alex")))))))
+          (delete-directory folder t)))))
+
+  (describe "paper metadata"
+    (it "builds paper search arguments"
+      (expect (papis--paper-search-arguments
+               "papers" "crossref" "attention" 5 "/tmp/out.json")
+              :to-equal '("-l" "papers" "explore" "crossref"
+                          "-q" "attention" "-m" "5"
+                          "export" "--format" "json"
+                          "--out" "/tmp/out.json")))
+
+    (it "labels paper results"
+      (let ((document (make-hash-table :test #'equal)))
+        (puthash "title" "Attention is all you need" document)
+        (puthash "author" "Vaswani, Ashish" document)
+        (puthash "year" "2017" document)
+        (expect (papis--paper-label document 0)
+                :to-equal "1. Attention is all you need — Vaswani, Ashish (2017)")))
+
+    (it "maps paper metadata to Papis fields"
+      (let ((document (make-hash-table :test #'equal))
+            (author (make-hash-table :test #'equal)))
+        (puthash "title" "Attention is all you need" document)
+        (puthash "year" "2017" document)
+        (puthash "doi" "10.1/example" document)
+        (puthash "family" "Vaswani" author)
+        (puthash "given" "Ashish" author)
+        (puthash "author_list" (list author) document)
+        (expect (papis--paper-metadata document)
+                :to-equal
+                '(("title" . "Attention is all you need")
+                  ("author_list"
+                   (("family" . "Vaswani") ("given" . "Ashish")))
+                  ("year" . "2017")
+                  ("doi" . "10.1/example")))))
+
+    (it "searches and returns metadata for a document"
+      (let ((document (papis-test--document
+                       '((title . "Attention is all you need")
+                         (author . "Vaswani, Ashish"))
+                       "papers"))
+            (result (make-hash-table :test #'equal)))
+        (puthash "title" "Attention is all you need" result)
+        (puthash "author" "Vaswani, Ashish" result)
+        (puthash "year" "2017" result)
+        (cl-letf (((symbol-function 'read-string)
+                   (lambda (&rest _) "attention"))
+                  ((symbol-function 'papis--paper-search-documents)
+                   (lambda (&rest _) (list result)))
+                  ((symbol-function 'completing-read)
+                   (lambda (_prompt collection &rest _) (caar collection))))
+          (expect (papis-paper-metadata-for-document document "crossref")
+                  :to-equal
+                  '(("title" . "Attention is all you need")
+                    ("author_list"
+                     (("family" . "Vaswani") ("given" . "Ashish")))
+                    ("year" . "2017"))))))
+
+    (it "imports metadata for a DOI"
+      (let ((document (papis-test--document
+                       '((title . "old") (author . "old"))
+                       "papers"))
+            (identifier nil))
+        (cl-letf (((symbol-function 'read-string)
+                   (lambda (&rest _) "10.1/example"))
+                  ((symbol-function 'papis--paper-import-metadata)
+                   (lambda (source value)
+                     (setq identifier (list source value))
+                     '(("title" . "Imported")))))
+          (expect (papis-paper-metadata-for-document document "doi")
+                  :to-equal '(("title" . "Imported")))
+          (expect identifier :to-equal '("doi" "10.1/example"))))))
 
   (describe "book metadata"
     (it "finds the EPUB and PDF files of a document"

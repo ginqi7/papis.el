@@ -60,40 +60,56 @@ Start the ETAF cover gallery with `M-x papis-etaf-open`.
 No Papis server is needed: queries run the `papis` executable with `papis
 exec`, so results come from the current Papis cache and `info.yaml`.
 
+`M-x papis-add-book` adds a book: it prompts for the EPUB/PDF, library, title,
+author and year (defaults are parsed from a file name shaped like
+`Author - Title (Year).ext`), runs `papis add`, then writes a structured
+`author_list` and lets Papis generate the `author` string.
+
+
 ## Cover gallery (ETAF)
 
 `M-x papis-etaf-open` opens `*papis-etaf*`, a responsive gallery of book
 covers.  Each card shows the cover, title, author and the first tag; selecting
-a card enables the open, folder, info, metadata, BibTeX and URL actions below
-the grid.  Moving the keyboard cursor to a card (Tab, the arrow keys or a
+a card shows its details and the shortcut reference in the bar below the grid,
+and all document actions are keyboard shortcuts (there are no action
+buttons).  Moving the keyboard cursor to a card (Tab, the arrow keys or a
 click) selects that book immediately.
 Covers are extracted from EPUB metadata, rendered from the first PDF page when
 `pdftoppm` or `mutool` is available, or generated as an SVG cover from the
-document metadata.  The cache lives in `papis-etaf-cover-directory`
-(`~/.cache/papis/etaf-covers` by default); use `M-x
-papis-etaf-clear-cover-cache` to rebuild it.
+document metadata.  PDF papers are rendered as typographic covers built from
+their title, authors, venue, year and DOI; set
+`papis-etaf-paper-cover-style` to `first-page` to use the PDF page instead.
+Generated SVG covers and covers extracted or rendered from EPUB/PDF files are
+written to the document folder as `cover.svg`, `cover.jpg` or `cover.png` and
+appended to its `files` metadata, so they are part of the document rather than
+the cache.  `papis-etaf-cover-directory` (`~/.cache/papis/etaf-covers` by
+default) is only used when a document has no folder; `M-x
+papis-etaf-clear-cover-cache` clears that fallback cache.
 
-`m` (or the **Metadata** button) looks the selected book up on Open Library —
-by ISBN when the document has one, otherwise by title and author — and offers
-the matches.  After confirmation it writes the chosen title, author(s), year,
-publisher and ISBN back with `papis update`, so the new metadata is in
-`info.yaml` and in the gallery immediately.  This command comes from the
-optional `papis-openlibrary.el` module.
+`m` prompts for a metadata source: Open Library,
+Crossref, arXiv, DBLP, a DOI or PubMed identifier, or the PDF's first page.
+Open Library searches by ISBN when the document has one and otherwise by title
+and author; the paper sources search Crossref/arXiv/DBLP or import the given
+identifier.  After choosing a result, the title, author(s), year and other
+fields are written back with `papis update`, so the new metadata is in
+`info.yaml` and in the gallery immediately.  Crossref/arXiv/DBLP results are
+limited by `papis-paper-search-limit`.
 
-`M` (or the **File metadata** button) runs `scripts/papis_book_metadata.py` on
+`M` runs `scripts/papis_book_metadata.py` on
 the selected book's EPUB or PDF: the script merges the file's metadata with
 `info.yaml`, writes both back, renames the file to
 `author - title (year).epub` (or `.pdf`) and refreshes the Papis cache.  The
 same script is available outside the gallery as `M-x
 papis-update-book-metadata`, which prompts for a library and document.
 
-`C` (or the **Cover** button) searches Open Library for a cover of the selected
-book, saves the chosen image as `cover.jpg` in the document folder and appends
-it to the document's `files` metadata, so the gallery uses it as the cover
-immediately.  When the document has an EPUB file, the image is also embedded
-in the EPUB (manifest `cover-image` item and OPF `cover` meta), so other
-readers show it as well.  The same lookup is available as `M-x
-papis-openlibrary-set-cover`.
+`C` asks whether to generate a cover locally or
+download one from Open Library.  A generated cover is written to the document
+folder as `cover.svg`; a downloaded cover is saved as `cover.jpg`.  In both
+cases the file is appended to the document's `files` metadata, so the most
+recently attached cover is the one shown.  When the document has an EPUB file,
+a downloaded image is also embedded in the EPUB (manifest `cover-image` item
+and OPF `cover` meta), so other readers show it as well.  The Open Library
+lookup is also available as `M-x papis-openlibrary-set-cover`.
 
 | Key       | Command                          |
 |-----------|----------------------------------|
@@ -106,9 +122,11 @@ papis-openlibrary-set-cover`.
 | `u`       | Open the selected document's URL |
 | `d`       | Open the document folder         |
 | `i`       | Open `info.yaml`                 |
-| `m`       | Look up metadata on Open Library |
+| `a`       | Add a book to the current library |
+| `t`       | Add a tag to the selected book |
+| `m`       | Look up metadata (multiple sources) |
 | `M`       | Update EPUB/PDF metadata and rename |
-| `C`       | Find and attach an Open Library cover |
+| `C`       | Generate or download a cover |
 | `b`       | Copy a BibTeX entry              |
 | `c`       | Copy a human-readable reference  |
 | `q`       | Quit the gallery                 |
@@ -145,6 +163,22 @@ string with `papis update --reset author`, using the
 `multiple-authors-format` and `multiple-authors-separator` configuration.  The
 Open Library command and `scripts/papis_book_metadata.py` both follow this
 rule.
+
+After editing `author_list` manually in `info.yaml`, run
+
+```elisp
+M-x papis-update-author
+```
+
+or, without Emacs:
+
+```sh
+papis -l <library> cache update --all
+papis -l <library> exec scripts/papis_author.py <document-folder>
+papis -l <library> cache update --all
+```
+
+Both write only `info.yaml`, so the attached files keep their names.
 
 ### Date serialization
 

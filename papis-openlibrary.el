@@ -322,11 +322,8 @@ or nil."
       (unless cover
         (user-error "No cover available for \"%s\""
                     (papis-openlibrary-label result)))
-      (unless (member (file-name-nondirectory cover)
-                      (mapcar #'file-name-nondirectory
-                              (papis-document-files document)))
-        (papis-document-add-file document
-                                 (file-name-nondirectory cover)))
+      (papis-document-attach-file document
+                                  (file-name-nondirectory cover))
       (when (papis-document-epub-file document)
         (papis-document-embed-cover document cover))
       cover)))
