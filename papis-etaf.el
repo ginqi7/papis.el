@@ -60,15 +60,20 @@
   :type 'directory
   :group 'papis-etaf)
 
-(defcustom papis-etaf-card-min-width 190
+(defcustom papis-etaf-card-min-width 150
   "Minimum width of one book card in pixels.
 
-The gallery fits as many columns of this width as the window allows."
+The gallery fits as many columns of this width as the window allows.
+A smaller value makes each card (and, with the 1.5 cover ratio, its
+height) smaller."
   :type 'integer
   :group 'papis-etaf)
 
 (defcustom papis-etaf-max-columns 8
-  "Maximum number of book cards in one gallery row."
+  "Maximum number of book cards in one gallery row.
+
+More columns make each card smaller while keeping the 1.5 cover
+aspect."
   :type 'integer
   :group 'papis-etaf)
 
@@ -77,18 +82,27 @@ The gallery fits as many columns of this width as the window allows."
   :type 'integer
   :group 'papis-etaf)
 
+(defcustom papis-etaf-page-margin 6
+  "Horizontal page margin in characters."
+  :type 'integer
+  :group 'papis-etaf)
+
+(defcustom papis-etaf-cover-aspect 1.5
+  "Height of a book cover as a multiple of its width."
+  :type 'number
+  :group 'papis-etaf)
+
 (defcustom papis-etaf-unzip-program "unzip"
   "Program used to read EPUB archives."
   :type 'string
   :group 'papis-etaf)
 
-(defcustom papis-etaf-books-height-fraction 0.75
-  "Fraction of the window height used by the book list.
+(defcustom papis-etaf-visible-rows 2
+  "Number of book rows visible on the gallery page.
 
-The list gets its own scrollable box of this height, so a long
-library scrolls inside the box instead of stretching the whole
-page."
-  :type 'number
+The list scrolls vertically for any remaining rows.  The page height
+follows this value instead of a fixed fraction of the window."
+  :type 'integer
   :group 'papis-etaf)
 
 (defconst papis-etaf--cover-version 4
@@ -822,9 +836,11 @@ edited in place needs a fresh object."
          (char-width (max 8 (or (plist-get metrics :char-width) 8)))
          (line-height (max 18 (or (plist-get metrics :line-height) 18)))
          (gap papis-etaf-gap)
+         (margin-width (* 2 papis-etaf-page-margin))
          (available (if (display-graphic-p)
-                        (max 240 (- width (* 4 char-width)))
-                      (max 240 (* char-width (max 1 (- width 4))))))
+                        (max 240 (- width (* margin-width char-width)))
+                      (max 240 (* char-width
+                                   (max 1 (- width margin-width))))))
          (columns (max 1
                        (min papis-etaf-max-columns
                             (floor (/ (+ available gap)
@@ -834,7 +850,8 @@ edited in place needs a fresh object."
                                     columns))))
          (image-columns (max 8 (floor (/ card-width char-width))))
          (image-rows (max 4
-                          (round (/ (* image-columns char-width 1.5)
+                          (round (/ (* image-columns char-width
+                                      papis-etaf-cover-aspect)
                                     line-height)))))
     (list columns image-columns image-rows)))
 
@@ -852,6 +869,16 @@ edited in place needs a fresh object."
          (list (papis-document-year-string document)
                (papis-document-file-type document)))
    " · "))
+
+(defun papis-etaf--document-file-name (document)
+  "Return the display name of DOCUMENT's book file, or nil.
+
+Prefer a file that actually exists in the document folder, so the
+displayed name stays correct when the cached `files' value is stale."
+  (when-let* ((file (or (car (papis-document--existing-book-files document))
+                        (car (papis-document-book-files document))
+                        (papis-document-file document))))
+    (file-name-nondirectory file)))
 
 (defun papis-etaf--tag-label (document)
   "Return the tag pill label of DOCUMENT."
@@ -1002,14 +1029,14 @@ definition instead."
                    :font-size 12
                    (expr tag))))
          (text :color title-color
-               :font-size 16
+               :font-size 14
                :font-weight (if selected-p 'bold 'normal)
                :text-decoration-line (if highlight-p '(underline) nil)
                :on-press select
                (expr (concat (if selected-p "> " "  ")
                              (papis-etaf--truncate title (- title-width 2)))))
          (text :color author-color
-               :font-size 13
+               :font-size 12
                :on-press select
                (expr (papis-etaf--truncate author-label title-width))))))))
 
@@ -1024,11 +1051,12 @@ definition instead."
          (error (etaf-value (papis-etaf--session-error session)))
          (viewport (etaf-viewport))
          (layout (papis-etaf--gap-layout (car viewport)))
-         (books-rows (max 6 (floor (* (or (cdr viewport) 24)
-                                      papis-etaf-books-height-fraction))))
          (columns (nth 0 layout))
          (image-columns (nth 1 layout))
          (image-rows (nth 2 layout))
+         (visible-rows (max 1 papis-etaf-visible-rows))
+         (books-rows (max 6 (+ (* visible-rows (+ image-rows 2))
+                               (* (1- visible-rows) 1))))
          (entries (seq-map-indexed (lambda (document index)
                                       (cons index document))
                                     documents))
@@ -1039,7 +1067,9 @@ definition instead."
                                     (list (papis-document-author selected)
                                           (papis-document-year-string selected)
                                           (papis-document-file-type selected)))
-                              " · "))))
+                              " · ")))
+         (selected-file (and selected
+                             (papis-etaf--document-file-name selected))))
     (etaf-view
      (column :class "papis-etaf-root"
              :width 'stretch
@@ -1047,7 +1077,8 @@ definition instead."
              :overflow 'scroll
              :background-color (plist-get palette :bg)
              :color (plist-get palette :fg)
-             :padding '((lh 1) (ch 2))
+             :padding (list (papis-etaf--lh 1)
+                            (list 'ch papis-etaf-page-margin))
              :item-gap '(lh 1)
              :keys (papis-etaf--keys)
        (flex :class "papis-etaf-header"
@@ -1091,7 +1122,11 @@ definition instead."
               :hover-style (list :background-color
                                  (plist-get palette :accent-soft))
               :on-press (lambda () (papis-etaf--reload session))
-           "Refresh"))
+           "Refresh")
+         (text :color (plist-get palette :border) "│")
+         (text :color (plist-get palette :muted)
+               :font-size 12
+               "Move or click a card to select · o open · d folder · i info · m OL metadata · C cover · M file metadata · b BibTeX · q quit"))
        (flex :class "papis-etaf-search-row"
              :flex-flow '(row wrap)
              :align-items 'center
@@ -1135,7 +1170,7 @@ definition instead."
                :width 'stretch
                :grid-template-columns
                (make-list columns '(minmax (px 0) (fr 1)))
-               :gap (list (papis-etaf--lh 2) (papis-etaf--px papis-etaf-gap))
+               :gap (list (papis-etaf--lh 1) (papis-etaf--px papis-etaf-gap))
            (papis-etaf-book :for (entry entries)
                             :key (car entry)
                             :document (cdr entry)
@@ -1156,7 +1191,11 @@ definition instead."
              (text :font-size 16 :font-weight 'bold
                    (expr (papis-etaf--truncate selected-title 48)))
              (text :font-size 12 :color (plist-get palette :muted)
-                   (expr selected-meta)))
+                   (expr selected-meta))
+             (text :if selected-file
+                   :font-size 12
+                   :color (plist-get palette :muted)
+                   (expr (papis-etaf--truncate selected-file 60))))
            (flex :flex-flow '(row wrap)
                  :align-items 'center
                  :gap '((lh 0) (ch 1))
@@ -1199,9 +1238,7 @@ definition instead."
                     (lambda ()
                       (papis-etaf--call #'papis-document-open-url selected))
                     (null (papis-document-url selected)))))))
-       (text :color (plist-get palette :muted)
-             :font-size 12
-             "Move or click a card to select · o open · d folder · i info · m OL metadata · C cover · M file metadata · b BibTeX · q quit")))))
+))))
 
 ;;; Entry point
 

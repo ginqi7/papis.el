@@ -53,7 +53,14 @@
         (let ((truncated (papis-etaf--truncate "abcdef" 4)))
           (expect (string-width truncated) :to-equal 4)
           (expect (string-suffix-p "…" truncated) :to-be-truthy))
-        (expect (papis-etaf--truncate "abc" 4) :to-equal "abc")))
+        (expect (papis-etaf--truncate "abc" 4) :to-equal "abc"))
+
+      (it "shows the attached book file name"
+        (let ((document (papis-etaf-test--document
+                         '((title . "A Book")
+                           (files . ("/tmp/A Book (2020).epub"))))))
+          (expect (papis-etaf--document-file-name document)
+                  :to-equal "A Book (2020).epub"))))
 
     (describe "generated covers"
       (it "escapes metadata in the SVG"
