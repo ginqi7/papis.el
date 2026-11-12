@@ -131,6 +131,31 @@ the request fails."
                   isbns)
         (car isbns))))
 
+(defun papis-openlibrary--author-entry (name)
+  "Return a structured AUTHOR-LIST entry for NAME.
+
+Names written as \"Family, Given\" keep that split; otherwise the
+last word is treated as the family name."
+  (let ((name (string-trim (or name ""))))
+    (cond
+     ((string-empty-p name) nil)
+     ((string-match "\\`\\([^,]+\\),\\s-*\\(.+\\)\\'" name)
+      (list (cons "family" (string-trim (match-string 1 name)))
+            (cons "given" (string-trim (match-string 2 name)))))
+     ((string-match "\\`\\(.+\\)\\s-+\\([^ \t]+\\)\\'" name)
+      (list (cons "family" (match-string 2 name))
+            (cons "given" (string-trim (match-string 1 name)))))
+     (t
+      (list (cons "family" name) (cons "given" ""))))))
+
+(defun papis-openlibrary-author-list (authors)
+  "Return structured AUTHOR-LIST entries for Open Library AUTHORS."
+  (delq nil
+        (mapcar (lambda (name)
+                  (papis-openlibrary--author-entry
+                   (papis-openlibrary--string name)))
+                authors)))
+
 (defun papis-openlibrary-metadata (doc)
   "Return Papis metadata fields built from Open Library result DOC."
   (let ((title (alist-get "title" doc nil nil #'equal))
@@ -140,13 +165,8 @@ the request fails."
         (isbns (alist-get "isbn" doc nil nil #'equal)))
     (delq nil
           (list (cons "title" (papis-openlibrary--string title))
-                (cons "author"
-                      (and authors
-                           (string-join
-                            (delq nil
-                                  (mapcar #'papis-openlibrary--string
-                                          authors))
-                            " and ")))
+                (cons "author_list"
+                      (papis-openlibrary-author-list authors))
                 (cons "year" (papis-openlibrary--string year))
                 (cons "publisher"
                       (papis-openlibrary--string
@@ -195,9 +215,23 @@ is found."
            (format "Update \"%s\" with:\n%s\n"
                    (papis-document-title document)
                    (string-join
-                    (mapcar (lambda (field)
-                              (format "%s: %s" (car field) (cdr field)))
-                            fields)
+                    (mapcar
+                     (lambda (field)
+                       (format "%s: %s"
+                               (car field)
+                               (if (equal (car field) "author_list")
+                                   (string-join
+                                    (mapcar
+                                     (lambda (entry)
+                                       (string-trim
+                                        (concat
+                                         (cdr (assoc "given" entry))
+                                         " "
+                                         (cdr (assoc "family" entry)))))
+                                     (cdr field))
+                                    " and ")
+                                 (cdr field))))
+                     fields)
                     "\n")))
       fields)))
 

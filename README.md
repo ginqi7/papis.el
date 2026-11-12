@@ -137,6 +137,15 @@ Functions that change metadata — `papis-document-update`,
 `papis-document-add-file`, the tag commands and the book metadata script —
 refresh the Papis cache for the document folder afterwards.
 
+### Author metadata
+
+Author changes write the structured `author_list` field (a list of
+`{family, given}` mappings) and then let Papis generate the display `author`
+string with `papis update --reset author`, using the
+`multiple-authors-format` and `multiple-authors-separator` configuration.  The
+Open Library command and `scripts/papis_book_metadata.py` both follow this
+rule.
+
 ### Date serialization
 
 `scripts/papis_dump.py` serializes documents with `default=str`, so YAML

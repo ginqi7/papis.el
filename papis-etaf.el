@@ -784,7 +784,7 @@ edited in place needs a fresh object."
          (fields (papis-openlibrary-metadata-for-document document)))
     (when fields
       (papis-document-update document fields)
-      (papis-etaf--replace-document session document)
+      (papis-etaf--reload session)
       (message "Updated \"%s\" from Open Library"
                (papis-document-title document)))))
 

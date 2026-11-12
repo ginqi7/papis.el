@@ -320,16 +320,45 @@
                      (list :status 0 :stdout "" :stderr ""))))
           (papis-document-update
            document (list (cons "title" "New Title")
-                          (cons "author" "A. Writer")
+                          (cons "author_list"
+                                (list (list (cons "family" "Writer")
+                                            (cons "given" "A."))))
                           (cons "publisher" nil)))
           (expect arguments
                   :to-equal '("-l" "books" "update" "--batch" "--all"
                               "papis_id:abc123"
                               "--set" "title" "New Title"
-                              "--set" "author" "A. Writer"))
+                              "--set" "author_list"
+                              "[{\"family\":\"Writer\",\"given\":\"A.\"}]"
+                              "--reset" "author"))
           (expect (papis-document-title document) :to-equal "New Title")
-          (expect (papis-document-author document) :to-equal "A. Writer")
+          (expect (papis-document-get document "author_list")
+                  :to-equal '((("family" . "Writer") ("given" . "A."))))
           (expect (papis-document-year document) :to-equal 1990)
+          (expect refreshed :to-be document))))
+
+    (it "regenerates author from author_list with Papis"
+      (let ((document (papis-test--document
+                       '((papis_id . "abc123")
+                         (title . "A Title")
+                         (_papis_local_folder . "/tmp/books/a-title"))))
+            (arguments nil)
+            (refreshed nil))
+        (cl-letf (((symbol-function 'papis-document-refresh-cache)
+                   (lambda (doc) (setq refreshed doc)))
+                  ((symbol-function 'papis--call-cli-result)
+                   (lambda (args)
+                     (setq arguments args)
+                     (list :status 0 :stdout "" :stderr "")))
+                  ((symbol-function 'papis--call-cli)
+                   (lambda (_args) "Writer, A."))
+                  ((symbol-function 'papis--clean-cli-output) #'identity))
+          (expect (papis-document-reset-author document) :to-be-truthy)
+          (expect arguments
+                  :to-equal '("-l" "books" "update" "--batch" "--all"
+                              "--doc-folder" "/tmp/books/a-title/"
+                              "--reset" "author"))
+          (expect (papis-document-author document) :to-equal "Writer, A.")
           (expect refreshed :to-be document))))
 
     (it "builds `papis update' arguments that append a file"
@@ -507,7 +536,9 @@
                         ((symbol-function 'papis-document-refresh-cache)
                          (lambda (doc)
                            (setq refreshed doc)
-                           (list :status 0))))
+                           (list :status 0)))
+                        ((symbol-function 'papis-document-reset-author)
+                         (lambda (_document) t)))
                 (expect (papis-document-update-book-metadata document)
                         :to-equal "renamed: book.epub -> a-book.epub")
                 (expect ran :to-equal file)
@@ -534,7 +565,9 @@
                         ((symbol-function 'papis-document-refresh-cache)
                          (lambda (doc)
                            (setq refreshed doc)
-                           (list :status 0))))
+                           (list :status 0)))
+                        ((symbol-function 'papis-document-reset-author)
+                         (lambda (_document) t)))
                 (expect (papis-document-update-book-metadata document)
                         :to-equal "renamed: book.pdf -> a-book.pdf")
                 (expect ran :to-equal file)

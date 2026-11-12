@@ -26,8 +26,11 @@ import yaml
 UNSAFE = re.compile(r'[/\\*?"<>|\x00-\x1f]')
 COLON = re.compile(r"\s*:\s*")
 
-# info.yaml key -> OPF/DC element name
-DC_TAGS = {"title": "title", "author": "creator", "date": "date"}
+# info.yaml key -> OPF/DC element name for reading/metadata merging
+DC_TAGS = {"title": "title", "date": "date"}
+
+# Additional OPF/DC tags written from structured data
+DC_WRITE_TAGS = {"title": "title", "author": "creator", "date": "date"}
 
 # info.yaml key -> exiftool tag written for PDF files
 PDF_WRITE_TAGS = {"title": "Title", "author": "Author", "date": "CreateDate"}
@@ -54,9 +57,49 @@ def meta(book, name):
     return None
 
 
-def primary_author(author):
-    """'A; B' -> 'A' (translator/co-author list trimmed to the main author)."""
-    return author.split(";")[0].strip() if author else None
+def parse_author_name(name):
+    """Return {'family': ..., 'given': ...} for one author NAME."""
+    name = (name or "").strip()
+    if not name:
+        return None
+    if "," in name:
+        family, given = name.split(",", 1)
+        return {"family": family.strip(), "given": given.strip()}
+    parts = name.split()
+    if len(parts) == 1:
+        return {"family": parts[0], "given": ""}
+    return {"family": parts[-1], "given": " ".join(parts[:-1])}
+
+
+def author_list_from_text(text):
+    """Split 'A; B' or 'A and B' into structured author entries."""
+    if not text:
+        return []
+    authors = []
+    for piece in re.split(r"\s*;\s*|\s+and\s+", str(text)):
+        author = parse_author_name(piece)
+        if author:
+            authors.append(author)
+    return authors
+
+
+def author_list_to_text(authors):
+    """Format structured authors for EPUB/PDF metadata."""
+    names = []
+    for author in authors or []:
+        family = str(author.get("family", "")).strip()
+        given = str(author.get("given", "")).strip()
+        name = " ".join(part for part in (given, family) if part)
+        if name:
+            names.append(name)
+    return " and ".join(names)
+
+
+def primary_author(authors):
+    """Return the display name of the first structured author."""
+    if not authors:
+        return None
+    return author_list_to_text([authors[0]]) or None
 
 
 def year_of(date):
@@ -171,7 +214,7 @@ def find_opf(zf):
 
 def set_opf_metadata(opf, updates):
     for key, value in updates.items():
-        tag = f"dc:{DC_TAGS[key]}"
+        tag = f"dc:{DC_WRITE_TAGS[key]}"
         pattern = re.compile(rf"(<{tag}\b[^>]*>)(.*?)(</{tag}>)", re.S)
         if pattern.search(opf):
             opf = pattern.sub(
@@ -203,7 +246,14 @@ def rewrite_zip(path, replacements, additions=None):
 
 def read_epub_fields(path):
     book = epub.read_epub(str(path))
-    return {key: meta(book, dc) for key, dc in DC_TAGS.items()}
+    authors = []
+    for value, _attrs in book.get_metadata("DC", "creator"):
+        authors.extend(author_list_from_text(value))
+    return {
+        "title": meta(book, "title"),
+        "author_list": authors,
+        "date": meta(book, "date"),
+    }
 
 
 def update_epub_metadata(path, updates):
@@ -471,7 +521,7 @@ def read_pdf_fields(path):
     )
     return {
         "title": as_text(data.get("Title")),
-        "author": as_text(data.get("Author")),
+        "author_list": author_list_from_text(as_text(data.get("Author"))),
         "date": date,
     }
 
@@ -542,6 +592,10 @@ def values_match(kind, key, left, right):
 
 
 def write_fields(path, kind, updates):
+    updates = dict(updates)
+    authors = updates.pop("author_list", None)
+    if authors:
+        updates["author"] = author_list_to_text(authors)
     if kind == "epub":
         return update_epub_metadata(path, updates)
     return update_pdf_metadata(path, updates)
@@ -602,6 +656,12 @@ def main():
         if value:
             info[key] = value
 
+    existing_authors = existing.get("author_list")
+    if not isinstance(existing_authors, list) or not existing_authors:
+        existing_authors = author_list_from_text(as_text(existing.get("author")))
+    if existing_authors:
+        info["author_list"] = existing_authors
+
     # keep info.yaml's `date` and `year` in agreement (date joined by file)
     file_date = fields.get("date")
     info["date"], date_year = reconcile_date(
@@ -629,6 +689,10 @@ def main():
             )
             continue
         diff[key] = value
+    info_authors = info.get("author_list") or []
+    file_authors = fields.get("author_list") or []
+    if info_authors and info_authors != file_authors:
+        diff["author_list"] = info_authors
     if diff:
         for key, value in diff.items():
             print(f"sync {kind} {key}: {fields.get(key)!r} -> {value!r}")
@@ -641,7 +705,7 @@ def main():
 
     # --- rename file to "author - title (year).ext" ---
     new_name = build_name(
-        primary_author(info.get("author")),
+        primary_author(info.get("author_list")),
         info.get("title"),
         info.get("year"),
         path.suffix,
@@ -659,6 +723,8 @@ def main():
     # --- write metadata, point info.yaml `files` at the new name ---
     if info:
         existing.pop("creator", None)  # not a papis key
+        if info.get("author_list"):
+            existing.pop("author", None)
         existing.update(info)
         if isinstance(info.get("year"), str) and info["year"].isdigit():
             existing["year"] = int(info["year"])  # papis-style numeric year

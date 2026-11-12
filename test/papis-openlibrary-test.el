@@ -37,11 +37,19 @@
               :to-equal
               "The Little Schemer — Daniel P. Friedman, Matthias Felleisen (1995)"))
 
+    (it "splits author names into family and given parts"
+      (expect (papis-openlibrary--author-entry "Kleppmann, Martin")
+              :to-equal '(("family" . "Kleppmann") ("given" . "Martin")))
+      (expect (papis-openlibrary--author-entry "Martin Kleppmann")
+              :to-equal '(("family" . "Kleppmann") ("given" . "Martin"))))
+
     (it "builds Papis fields and prefers a 13-digit ISBN"
       (expect (papis-openlibrary-metadata papis-openlibrary-test--result)
               :to-equal
               '(("title" . "The Little Schemer")
-                ("author" . "Daniel P. Friedman and Matthias Felleisen")
+                ("author_list" .
+                 ((("family" . "Friedman") ("given" . "Daniel P."))
+                  (("family" . "Felleisen") ("given" . "Matthias"))))
                 ("year" . "1995")
                 ("publisher" . "MIT Press")
                 ("isbn" . "9780262560993")))))
@@ -69,7 +77,9 @@
           (expect (papis-openlibrary-metadata-for-document document)
                   :to-equal
                   '(("title" . "The Little Schemer")
-                    ("author" . "Daniel P. Friedman and Matthias Felleisen")
+                    ("author_list" .
+                     ((("family" . "Friedman") ("given" . "Daniel P."))
+                      (("family" . "Felleisen") ("given" . "Matthias"))))
                     ("year" . "1995")
                     ("publisher" . "MIT Press")
                     ("isbn" . "9780262560993"))))))

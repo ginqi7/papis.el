@@ -782,8 +782,10 @@ Return non-nil on success."
   "Return FIELDS without entries whose value is nil or empty."
   (seq-filter
    (lambda (field)
-     (not (string-empty-p
-           (string-trim (papis--value-to-string (cdr field))))))
+     (if (papis--document-author-list-field-p field)
+         (cdr field)
+       (not (string-empty-p
+             (string-trim (papis--value-to-string (cdr field)))))))
    fields))
 
 (defun papis--document-selector-arguments (document)
@@ -807,21 +809,39 @@ its id."
               (list "Cannot update a document without an id or folder")))
     (cons library selector)))
 
+(defun papis--document-field-value (field)
+  "Return FIELD's value formatted for `papis update --set'.
+
+Structured AUTHOR-LIST values are passed as JSON, which is also a
+valid Python literal and lets Papis rebuild the author string."
+  (let ((name (papis-document-field-name (car field))))
+    (if (equal name "author_list")
+        (json-encode (cdr field))
+      (papis--value-to-string (cdr field)))))
+
+(defun papis--document-author-list-field-p (field)
+  "Return non-nil when FIELD is the structured AUTHOR-LIST."
+  (equal (papis-document-field-name (car field)) "author_list"))
+
 (defun papis-document-update-arguments (document fields)
   "Return the `papis update' arguments that set FIELDS on DOCUMENT.
 
 FIELDS is an alist of (KEY . VALUE).  The document is selected by
-its folder when known, otherwise by its id."
+its folder when known, otherwise by its id.  When FIELDS contains
+AUTHOR-LIST, append `--reset author' so Papis regenerates AUTHOR."
   (let* ((selection (papis--document-selector-arguments document))
          (settings
           (seq-mapcat
            (lambda (field)
              (list "--set"
                    (papis-document-field-name (car field))
-                   (papis--value-to-string (cdr field))))
-           fields)))
+                   (papis--document-field-value field)))
+           fields))
+         (reset-author
+          (seq-some #'papis--document-author-list-field-p fields)))
     (append (list "-l" (car selection) "update" "--batch" "--all")
-            (cdr selection) settings)))
+            (cdr selection) settings
+            (when reset-author (list "--reset" "author")))))
 
 (defun papis-document-add-file-arguments (document file)
   "Return the `papis update' arguments that append FILE to DOCUMENT."
@@ -893,6 +913,46 @@ refreshed so other tools see the new metadata."
         (papis--document-set-field document (car field) (cdr field)))
       (papis-document-refresh-cache document)
       fields)))
+
+(defun papis-document-reset-author (document)
+  "Regenerate DOCUMENT's AUTHOR string from its AUTHOR-LIST.
+
+Run `papis update --reset author', refresh the cache, and read the
+generated author back into the in-memory document when possible."
+  (let* ((selection (papis--document-selector-arguments document))
+         (arguments (append (list "-l" (car selection) "update"
+                                  "--batch" "--all")
+                            (cdr selection)
+                            (list "--reset" "author")))
+         (result (papis--call-cli-result arguments))
+         (status (plist-get result :status))
+         (output (string-trim
+                  (concat (plist-get result :stdout)
+                          (plist-get result :stderr)))))
+    (when papis-debug
+      (message "Papis: %s %s (exit %s)\n%s"
+               (papis--papis-program)
+               (string-join arguments " ")
+               status output))
+    (unless (zerop status)
+      (signal 'papis-error
+              (list (format "`papis %s' failed (exit %s): %s"
+                            (string-join arguments " ")
+                            status
+                            (if (string-empty-p output)
+                                "no output"
+                              output)))))
+    (papis-document-refresh-cache document)
+    (when-let* ((folder (papis-document-folder document)))
+      (let ((author (string-trim
+                     (papis--clean-cli-output
+                      (papis--call-cli
+                       (list "-l" (car selection) "list"
+                             "--format" "{doc[author]}"
+                             "--doc-folder" folder))))))
+        (unless (string-empty-p author)
+          (papis--document-set-field document "author" author))))
+    t))
 
 ;;; Book metadata
 
@@ -1059,6 +1119,7 @@ output."
               (list (format "Not an EPUB or PDF file: %s" file))))
     (let ((output (papis--run-book-metadata-script file)))
       (papis-document-refresh-cache document)
+      (papis-document-reset-author document)
       output)))
 
 (defun papis-document-embed-cover (document cover)
